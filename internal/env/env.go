@@ -2,7 +2,9 @@ package env
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/iosifache/annas-mcp/internal/logger"
 	"go.uber.org/zap"
@@ -25,14 +27,19 @@ func GetEnv() (*Env, error) {
 	if secretKey == "" || downloadPath == "" {
 		err := errors.New("ANNAS_SECRET_KEY and ANNAS_DOWNLOAD_PATH environment variables must be set")
 
+		// Never log secret keys - use boolean flags instead
 		l.Error("Environment variables not set",
-			zap.String("ANNAS_SECRET_KEY", secretKey),
+			zap.Bool("ANNAS_SECRET_KEY_set", secretKey != ""),
 			zap.String("ANNAS_DOWNLOAD_PATH", downloadPath),
 			zap.String("ANNAS_BASE_URL", annasBaseURL),
 			zap.Error(err),
 		)
 
 		return nil, err
+	}
+
+	if !filepath.IsAbs(downloadPath) {
+		return nil, fmt.Errorf("ANNAS_DOWNLOAD_PATH must be an absolute path, got: %s", downloadPath)
 	}
 
 	if annasBaseURL == "" {

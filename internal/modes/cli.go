@@ -47,7 +47,7 @@ func StartCLI() {
 			searchTerm := args[0]
 			l.Info("Search command called", zap.String("searchTerm", searchTerm))
 
-			books, err := anna.FindBook(searchTerm)
+			books, err := anna.FindBook(searchTerm, "book_any")
 			if err != nil {
 				l.Error("Search command failed",
 					zap.String("searchTerm", searchTerm),
