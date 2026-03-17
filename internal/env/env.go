@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/iosifache/annas-mcp/internal/logger"
+	"github.com/PiefkePaul/annas-mcp/internal/logger"
 	"go.uber.org/zap"
 )
 
@@ -52,3 +52,4 @@ func GetEnv() (*Env, error) {
 		AnnasBaseURL: annasBaseURL,
 	}, nil
 }
+

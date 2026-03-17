@@ -7,5 +7,6 @@ dist
 # Binaries
 /annas-mcp
 
-# Environment file
+# Runtime artifacts
 .env
+downloads/

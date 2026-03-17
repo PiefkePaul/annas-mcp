@@ -18,8 +18,8 @@ import (
 	"regexp"
 
 	colly "github.com/gocolly/colly/v2"
-	"github.com/iosifache/annas-mcp/internal/env"
-	"github.com/iosifache/annas-mcp/internal/logger"
+	"github.com/PiefkePaul/annas-mcp/internal/env"
+	"github.com/PiefkePaul/annas-mcp/internal/logger"
 	"go.uber.org/zap"
 )
 
@@ -697,3 +697,4 @@ func (b *Book) ToJSON() (string, error) {
 
 	return string(data), nil
 }
+

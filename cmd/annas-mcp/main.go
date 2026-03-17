@@ -1,9 +1,10 @@
 package main
 
 import (
-	"github.com/iosifache/annas-mcp/internal/modes"
+	"github.com/PiefkePaul/annas-mcp/internal/modes"
 )
 
 func main() {
 	modes.StartCLI()
 }
+

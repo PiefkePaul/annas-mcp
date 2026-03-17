@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/PiefkePaul/annas-mcp/internal/anna"
+	"github.com/PiefkePaul/annas-mcp/internal/env"
+	"github.com/PiefkePaul/annas-mcp/internal/logger"
+	"github.com/PiefkePaul/annas-mcp/internal/version"
 	"github.com/charmbracelet/fang"
-	"github.com/iosifache/annas-mcp/internal/anna"
-	"github.com/iosifache/annas-mcp/internal/env"
-	"github.com/iosifache/annas-mcp/internal/logger"
-	"github.com/iosifache/annas-mcp/internal/version"
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -144,9 +144,7 @@ func StartCLI() {
 			query := args[0]
 			l.Info("Article search command called", zap.String("query", query))
 
-			// Auto-detect if input is a DOI (starts with "10.")
 			if strings.HasPrefix(strings.TrimSpace(query), "10.") {
-				// DOI lookup
 				l.Info("Detected DOI format, performing DOI lookup", zap.String("doi", query))
 
 				paper, err := anna.LookupDOI(query)
@@ -164,7 +162,6 @@ func StartCLI() {
 				return nil
 			}
 
-			// Article keyword search
 			l.Info("Performing article keyword search", zap.String("query", query))
 
 			papers, err := anna.FindArticle(query)
@@ -212,7 +209,6 @@ func StartCLI() {
 				return fmt.Errorf("failed to get environment: %w", err)
 			}
 
-			// Lookup paper
 			paper, err := anna.LookupDOI(doi)
 			if err != nil {
 				l.Error("DOI lookup failed for download",
@@ -222,7 +218,6 @@ func StartCLI() {
 				return fmt.Errorf("DOI lookup failed: %w", err)
 			}
 
-			// Try fast download first if hash and secret key available
 			if paper.Hash != "" && env.SecretKey != "" {
 				book := &anna.Book{
 					Hash:   paper.Hash,
@@ -243,7 +238,6 @@ func StartCLI() {
 				)
 			}
 
-			// Fall back to SciDB download
 			if err := paper.Download(env.DownloadPath); err != nil {
 				l.Error("SciDB download failed",
 					zap.String("doi", doi),
@@ -264,12 +258,22 @@ func StartCLI() {
 
 	mcpCmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Start the MCP server",
-		Long:  "Start the Model Context Protocol (MCP) server for integration with AI assistants.",
+		Short: "Start the MCP server over stdio",
+		Long:  "Start the Model Context Protocol (MCP) server over stdio for local desktop clients.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Exit CLI mode and start MCP server
 			StartMCPServer()
+			return nil
+		},
+	}
+
+	httpCmd := &cobra.Command{
+		Use:   "http",
+		Short: "Start the MCP server over Streamable HTTP",
+		Long:  "Expose the Model Context Protocol (MCP) server over Streamable HTTP for container and remote deployments.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			StartHTTPServer()
 			return nil
 		},
 	}
@@ -279,6 +283,7 @@ func StartCLI() {
 	rootCmd.AddCommand(articleSearchCmd)
 	rootCmd.AddCommand(articleDownloadCmd)
 	rootCmd.AddCommand(mcpCmd)
+	rootCmd.AddCommand(httpCmd)
 
 	if err := fang.Execute(
 		context.Background(),

@@ -4,10 +4,10 @@ import (
 	"context"
 	"strings"
 
-	"github.com/iosifache/annas-mcp/internal/anna"
-	"github.com/iosifache/annas-mcp/internal/env"
-	"github.com/iosifache/annas-mcp/internal/logger"
-	"github.com/iosifache/annas-mcp/internal/version"
+	"github.com/PiefkePaul/annas-mcp/internal/anna"
+	"github.com/PiefkePaul/annas-mcp/internal/env"
+	"github.com/PiefkePaul/annas-mcp/internal/logger"
+	"github.com/PiefkePaul/annas-mcp/internal/version"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.uber.org/zap"
 )
@@ -105,9 +105,7 @@ func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.C
 
 	l.Info("Article search command called", zap.String("query", query))
 
-	// Auto-detect if input is a DOI (starts with "10.")
 	if strings.HasPrefix(strings.TrimSpace(query), "10.") {
-		// DOI lookup
 		l.Info("Detected DOI format, performing DOI lookup", zap.String("doi", query))
 
 		paper, err := anna.LookupDOI(query)
@@ -128,7 +126,6 @@ func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.C
 		}, nil
 	}
 
-	// Article keyword search
 	l.Info("Performing article keyword search", zap.String("query", query))
 
 	papers, err := anna.FindArticle(query)
@@ -184,7 +181,6 @@ func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp
 		return nil, err
 	}
 
-	// Try fast_download API first if we have a hash and secret key
 	if paper.Hash != "" && env.SecretKey != "" {
 		book := &anna.Book{
 			Hash:   paper.Hash,
@@ -209,7 +205,6 @@ func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp
 		}
 	}
 
-	// Fall back to SciDB download
 	if err := paper.Download(env.DownloadPath); err != nil {
 		l.Error("SciDB download failed",
 			zap.String("doi", params.Arguments.DOI),
@@ -230,16 +225,7 @@ func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp
 	}, nil
 }
 
-func StartMCPServer() {
-	l := logger.GetLogger()
-	defer l.Sync()
-
-	serverVersion := version.GetVersion()
-	l.Info("Starting MCP server",
-		zap.String("name", "annas-mcp"),
-		zap.String("version", serverVersion),
-	)
-
+func newMCPServer(serverVersion string) *mcp.Server {
 	server := mcp.NewServer("annas-mcp", serverVersion, nil)
 
 	server.AddTools(
@@ -258,6 +244,22 @@ func StartMCPServer() {
 			mcp.Property("doi", mcp.Description("DOI of the article to download (e.g., '10.1038/nature12345')")),
 		)),
 	)
+
+	return server
+}
+
+func StartMCPServer() {
+	l := logger.GetLogger()
+	defer l.Sync()
+
+	serverVersion := version.GetVersion()
+	l.Info("Starting MCP server",
+		zap.String("name", "annas-mcp"),
+		zap.String("version", serverVersion),
+		zap.String("transport", "stdio"),
+	)
+
+	server := newMCPServer(serverVersion)
 
 	l.Info("MCP server started successfully")
 

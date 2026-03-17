@@ -1,4 +1,4 @@
-module github.com/iosifache/annas-mcp
+module github.com/PiefkePaul/annas-mcp
 
 go 1.23.4
 
@@ -49,3 +49,4 @@ require (
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 )
+
