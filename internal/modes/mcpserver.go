@@ -2,6 +2,7 @@ package modes
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/PiefkePaul/annas-mcp/internal/anna"
@@ -12,44 +13,34 @@ import (
 	"go.uber.org/zap"
 )
 
+const serverInstructions = "Use the Anna's Archive search tools first to find books or academic papers. Use download tools only when the user explicitly asks to save a file, because downloads write files into the server's configured download directory rather than returning file contents in chat. For article lookups, article_search also accepts a DOI directly when it starts with 10."
+
 func BookSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookSearchParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
+	query := strings.TrimSpace(params.Arguments.Query)
 
-	l.Info("Book search command called",
-		zap.String("query", params.Arguments.Query),
-	)
+	l.Info("Book search command called", zap.String("query", query))
 
-	books, err := anna.FindBook(params.Arguments.Query)
+	books, err := anna.FindBook(query)
 	if err != nil {
 		l.Error("Book search command failed",
-			zap.String("query", params.Arguments.Query),
+			zap.String("query", query),
 			zap.Error(err),
 		)
 		return nil, err
 	}
 
 	if len(books) == 0 {
-		l.Info("Book search returned no results",
-			zap.String("query", params.Arguments.Query),
-		)
-		return &mcp.CallToolResultFor[any]{
-			Content: []mcp.Content{&mcp.TextContent{Text: "No books found."}},
-		}, nil
-	}
-
-	bookList := ""
-	for _, book := range books {
-		bookList += book.String() + "\n\n"
+		l.Info("Book search returned no results", zap.String("query", query))
+		return textResult("No books found."), nil
 	}
 
 	l.Info("Book search command completed successfully",
-		zap.String("query", params.Arguments.Query),
+		zap.String("query", query),
 		zap.Int("resultsCount", len(books)),
 	)
 
-	return &mcp.CallToolResultFor[any]{
-		Content: []mcp.Content{&mcp.TextContent{Text: bookList}},
-	}, nil
+	return textResult(formatBookResults(books)), nil
 }
 
 func BookDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookDownloadParams]) (*mcp.CallToolResultFor[any], error) {
@@ -61,27 +52,22 @@ func BookDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.Ca
 		zap.String("format", params.Arguments.Format),
 	)
 
-	env, err := env.GetEnv()
+	downloadEnv, err := env.GetEnv()
 	if err != nil {
 		l.Error("Failed to get environment variables", zap.Error(err))
 		return nil, err
 	}
-	secretKey := env.SecretKey
-	downloadPath := env.DownloadPath
 
-	title := params.Arguments.Title
-	format := params.Arguments.Format
 	book := &anna.Book{
 		Hash:   params.Arguments.BookHash,
-		Title:  title,
-		Format: format,
+		Title:  params.Arguments.Title,
+		Format: params.Arguments.Format,
 	}
 
-	err = book.Download(secretKey, downloadPath)
-	if err != nil {
+	if err := book.Download(downloadEnv.SecretKey, downloadEnv.DownloadPath); err != nil {
 		l.Error("Download command failed",
 			zap.String("bookHash", params.Arguments.BookHash),
-			zap.String("downloadPath", downloadPath),
+			zap.String("downloadPath", downloadEnv.DownloadPath),
 			zap.Error(err),
 		)
 		return nil, err
@@ -89,23 +75,19 @@ func BookDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.Ca
 
 	l.Info("Download command completed successfully",
 		zap.String("bookHash", params.Arguments.BookHash),
-		zap.String("downloadPath", downloadPath),
+		zap.String("downloadPath", downloadEnv.DownloadPath),
 	)
 
-	return &mcp.CallToolResultFor[any]{
-		Content: []mcp.Content{&mcp.TextContent{
-			Text: "Book downloaded successfully to path: " + downloadPath,
-		}},
-	}, nil
+	return textResult("Book downloaded successfully to path: " + downloadEnv.DownloadPath), nil
 }
 
 func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleSearchParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
-	query := params.Arguments.Query
+	query := strings.TrimSpace(params.Arguments.Query)
 
 	l.Info("Article search command called", zap.String("query", query))
 
-	if strings.HasPrefix(strings.TrimSpace(query), "10.") {
+	if strings.HasPrefix(query, "10.") {
 		l.Info("Detected DOI format, performing DOI lookup", zap.String("doi", query))
 
 		paper, err := anna.LookupDOI(query)
@@ -114,19 +96,12 @@ func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.C
 				zap.String("doi", query),
 				zap.Error(err),
 			)
-			return &mcp.CallToolResultFor[any]{
-				Content: []mcp.Content{&mcp.TextContent{Text: "No paper found for DOI: " + query}},
-			}, nil
+			return textResult("No paper found for DOI: " + query), nil
 		}
 
 		l.Info("DOI lookup completed", zap.String("doi", query))
-
-		return &mcp.CallToolResultFor[any]{
-			Content: []mcp.Content{&mcp.TextContent{Text: paper.String()}},
-		}, nil
+		return textResult(paper.String()), nil
 	}
-
-	l.Info("Performing article keyword search", zap.String("query", query))
 
 	papers, err := anna.FindArticle(query)
 	if err != nil {
@@ -138,17 +113,8 @@ func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.C
 	}
 
 	if len(papers) == 0 {
-		l.Info("Article search returned no results",
-			zap.String("query", query),
-		)
-		return &mcp.CallToolResultFor[any]{
-			Content: []mcp.Content{&mcp.TextContent{Text: "No articles found."}},
-		}, nil
-	}
-
-	paperList := ""
-	for _, paper := range papers {
-		paperList += paper.String() + "\n\n"
+		l.Info("Article search returned no results", zap.String("query", query))
+		return textResult("No articles found."), nil
 	}
 
 	l.Info("Article search command completed successfully",
@@ -156,94 +122,118 @@ func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.C
 		zap.Int("resultsCount", len(papers)),
 	)
 
-	return &mcp.CallToolResultFor[any]{
-		Content: []mcp.Content{&mcp.TextContent{Text: paperList}},
-	}, nil
+	return textResult(formatPaperResults(papers)), nil
 }
 
 func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleDownloadParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
+	doi := strings.TrimSpace(params.Arguments.DOI)
 
-	l.Info("Download paper command called", zap.String("doi", params.Arguments.DOI))
+	l.Info("Download paper command called", zap.String("doi", doi))
 
-	env, err := env.GetEnv()
+	downloadEnv, err := env.GetDownloadEnv(false)
 	if err != nil {
-		l.Error("Failed to get environment variables", zap.Error(err))
+		l.Error("Failed to get download environment variables", zap.Error(err))
 		return nil, err
 	}
 
-	paper, err := anna.LookupDOI(params.Arguments.DOI)
+	paper, err := anna.LookupDOI(doi)
 	if err != nil {
 		l.Error("DOI lookup failed for download",
-			zap.String("doi", params.Arguments.DOI),
+			zap.String("doi", doi),
 			zap.Error(err),
 		)
 		return nil, err
 	}
 
-	if paper.Hash != "" && env.SecretKey != "" {
+	if paper.Hash != "" && downloadEnv.SecretKey != "" {
 		book := &anna.Book{
 			Hash:   paper.Hash,
 			Title:  paper.Title,
 			Format: "pdf",
 		}
-		if err := book.Download(env.SecretKey, env.DownloadPath); err != nil {
+		if err := book.Download(downloadEnv.SecretKey, downloadEnv.DownloadPath); err != nil {
 			l.Warn("Fast download failed, trying SciDB download",
-				zap.String("doi", params.Arguments.DOI),
+				zap.String("doi", doi),
 				zap.Error(err),
 			)
 		} else {
 			l.Info("Paper downloaded via fast download",
-				zap.String("doi", params.Arguments.DOI),
-				zap.String("path", env.DownloadPath),
+				zap.String("doi", doi),
+				zap.String("path", downloadEnv.DownloadPath),
 			)
-			return &mcp.CallToolResultFor[any]{
-				Content: []mcp.Content{&mcp.TextContent{
-					Text: "Paper downloaded successfully to path: " + env.DownloadPath,
-				}},
-			}, nil
+			return textResult("Paper downloaded successfully to path: " + downloadEnv.DownloadPath), nil
 		}
 	}
 
-	if err := paper.Download(env.DownloadPath); err != nil {
+	if err := paper.Download(downloadEnv.DownloadPath); err != nil {
 		l.Error("SciDB download failed",
-			zap.String("doi", params.Arguments.DOI),
+			zap.String("doi", doi),
 			zap.Error(err),
 		)
 		return nil, err
 	}
 
 	l.Info("Paper downloaded via SciDB",
-		zap.String("doi", params.Arguments.DOI),
-		zap.String("path", env.DownloadPath),
+		zap.String("doi", doi),
+		zap.String("path", downloadEnv.DownloadPath),
 	)
 
-	return &mcp.CallToolResultFor[any]{
-		Content: []mcp.Content{&mcp.TextContent{
-			Text: "Paper downloaded successfully to path: " + env.DownloadPath,
-		}},
-	}, nil
+	return textResult("Paper downloaded successfully to path: " + downloadEnv.DownloadPath), nil
 }
 
 func newMCPServer(serverVersion string) *mcp.Server {
-	server := mcp.NewServer("annas-mcp", serverVersion, nil)
+	server := mcp.NewServer("annas-mcp", serverVersion, &mcp.ServerOptions{Instructions: serverInstructions})
 
-	server.AddTools(
-		mcp.NewServerTool("book_search", "Search Anna's Archive for books by title, author, or topic. Returns book metadata including MD5 hash for downloading.", BookSearchTool, mcp.Input(
-			mcp.Property("query", mcp.Description("Search query for books (e.g., title, author, topic)")),
-		)),
-		mcp.NewServerTool("book_download", "Download a book by its MD5 hash from search results. Requires ANNAS_SECRET_KEY and ANNAS_DOWNLOAD_PATH environment variables.", BookDownloadTool, mcp.Input(
-			mcp.Property("hash", mcp.Description("MD5 hash of the book to download")),
-			mcp.Property("title", mcp.Description("Book title, used for filename")),
-			mcp.Property("format", mcp.Description("Book format, for example pdf or epub")),
-		)),
-		mcp.NewServerTool("article_search", "Search for academic articles/papers by DOI or keywords. Auto-detects if input is a DOI (starts with '10.') or a search term. Returns article metadata including DOI and hash.", ArticleSearchTool, mcp.Input(
-			mcp.Property("query", mcp.Description("DOI (e.g., '10.1038/nature12345') or search keywords for articles")),
-		)),
-		mcp.NewServerTool("article_download", "Download an academic article/paper by its DOI. Looks up the paper, then downloads via fast download (if available) or SciDB. Requires ANNAS_DOWNLOAD_PATH environment variable.", ArticleDownloadTool, mcp.Input(
-			mcp.Property("doi", mcp.Description("DOI of the article to download (e.g., '10.1038/nature12345')")),
-		)),
+	bookSearchTool := mcp.NewServerTool(
+		"book_search",
+		"Search Anna's Archive for books by title, author, or topic. Use this before any book download so you can inspect the metadata and MD5 hash first.",
+		BookSearchTool,
+		mcp.Input(
+			mcp.Property("query", mcp.Description("Book search query, such as a title, author, ISBN, or topic.")),
+		),
 	)
+	decorateReadOnlyTool(bookSearchTool, "Search books in Anna's Archive")
+	server.AddTools(bookSearchTool)
+
+	articleSearchTool := mcp.NewServerTool(
+		"article_search",
+		"Search Anna's Archive for academic papers by DOI or keywords. Use this to inspect article metadata before deciding whether to download.",
+		ArticleSearchTool,
+		mcp.Input(
+			mcp.Property("query", mcp.Description("A DOI like 10.1038/nature12345 or free-text article keywords.")),
+		),
+	)
+	decorateReadOnlyTool(articleSearchTool, "Search academic papers in Anna's Archive")
+	server.AddTools(articleSearchTool)
+
+	if env.CanBookDownload() {
+		bookDownloadTool := mcp.NewServerTool(
+			"book_download",
+			"Download a book file by MD5 hash into the server's configured download directory. Use this only after the user explicitly asks to save a file.",
+			BookDownloadTool,
+			mcp.Input(
+				mcp.Property("hash", mcp.Description("The MD5 hash returned by book_search.")),
+				mcp.Property("title", mcp.Description("Book title used to create the local filename.")),
+				mcp.Property("format", mcp.Description("Book file format, for example pdf or epub.")),
+			),
+		)
+		decorateWriteTool(bookDownloadTool, "Download a book file from Anna's Archive")
+		server.AddTools(bookDownloadTool)
+	}
+
+	if env.CanArticleDownload() {
+		articleDownloadTool := mcp.NewServerTool(
+			"article_download",
+			"Download an academic paper by DOI into the server's configured download directory. Use this only after the user explicitly asks to save a file.",
+			ArticleDownloadTool,
+			mcp.Input(
+				mcp.Property("doi", mcp.Description("The DOI of the paper to download, for example 10.1038/nature12345.")),
+			),
+		)
+		decorateWriteTool(articleDownloadTool, "Download an academic paper by DOI")
+		server.AddTools(articleDownloadTool)
+	}
 
 	return server
 }
@@ -266,4 +256,56 @@ func StartMCPServer() {
 	if err := server.Run(context.Background(), mcp.NewStdioTransport()); err != nil {
 		l.Fatal("MCP server failed", zap.Error(err))
 	}
+}
+
+func textResult(text string) *mcp.CallToolResultFor[any] {
+	return &mcp.CallToolResultFor[any]{
+		Content: []mcp.Content{&mcp.TextContent{Text: text}},
+	}
+}
+
+func formatBookResults(books []*anna.Book) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "Found %d books.\n\n", len(books))
+	for i, book := range books {
+		fmt.Fprintf(&builder, "Book %d\n%s", i+1, book.String())
+		if i < len(books)-1 {
+			builder.WriteString("\n\n")
+		}
+	}
+	return builder.String()
+}
+
+func formatPaperResults(papers []*anna.Paper) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "Found %d articles.\n\n", len(papers))
+	for i, paper := range papers {
+		fmt.Fprintf(&builder, "Article %d\n%s", i+1, paper.String())
+		if i < len(papers)-1 {
+			builder.WriteString("\n\n")
+		}
+	}
+	return builder.String()
+}
+
+func decorateReadOnlyTool(tool *mcp.ServerTool, title string) {
+	tool.Tool.Title = title
+	tool.Tool.Annotations = &mcp.ToolAnnotations{
+		Title:          title,
+		ReadOnlyHint:   true,
+		IdempotentHint: true,
+		OpenWorldHint:  boolPtr(true),
+	}
+}
+
+func decorateWriteTool(tool *mcp.ServerTool, title string) {
+	tool.Tool.Title = title
+	tool.Tool.Annotations = &mcp.ToolAnnotations{
+		Title:         title,
+		OpenWorldHint: boolPtr(true),
+	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }

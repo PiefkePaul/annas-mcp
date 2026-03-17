@@ -1,4 +1,4 @@
-package modes
+﻿package modes
 
 import (
 	"context"
@@ -23,12 +23,23 @@ func StartHTTPServer() {
 	l := logger.GetLogger()
 	defer l.Sync()
 
-	httpEnv := env.GetHTTPEnv()
+	httpEnv, err := env.GetHTTPEnv()
+	if err != nil {
+		l.Fatal("Invalid HTTP environment", zap.Error(err))
+	}
+
 	serverVersion := version.GetVersion()
 	server := newMCPServer(serverVersion)
+	availableTools := exposedToolNames()
+
+	if !httpEnv.ChatGPTCompatibleAuth() {
+		l.Warn("Bearer auth is enabled. ChatGPT MCP connectors currently expect no auth or OAuth rather than a custom bearer token.",
+			zap.String("authMode", string(httpEnv.AuthMode)),
+		)
+	}
 
 	mux := http.NewServeMux()
-	mux.Handle(httpEnv.Path, withBearerAuth(httpEnv.BearerToken, mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+	mux.Handle(httpEnv.Path, withConfiguredAuth(httpEnv, mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return server
 	}, nil)))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -58,14 +69,30 @@ func StartHTTPServer() {
 				return
 			}
 
-			writeJSON(w, http.StatusOK, map[string]any{
-				"name":                "annas-mcp",
-				"version":             serverVersion,
-				"transport":           "streamable-http",
-				"mcp_endpoint":        httpEnv.Path,
-				"health_endpoint":     "/healthz",
-				"bearer_auth_enabled": httpEnv.BearerToken != "",
-			})
+			payload := map[string]any{
+				"name":                    "annas-mcp",
+				"version":                 serverVersion,
+				"transport":               "streamable-http",
+				"mcp_endpoint":            httpEnv.Path,
+				"health_endpoint":         "/healthz",
+				"auth_mode":               httpEnv.AuthMode,
+				"chatgpt_auth_compatible": httpEnv.ChatGPTCompatibleAuth(),
+				"book_download_enabled":   env.CanBookDownload(),
+				"article_download_enabled": env.CanArticleDownload(),
+				"available_tools":         availableTools,
+			}
+
+			if connectorURL := httpEnv.ConnectorURL(); connectorURL != "" {
+				payload["chatgpt_connector_url"] = connectorURL
+			}
+			if httpEnv.PublicBaseURL != "" {
+				payload["public_base_url"] = httpEnv.PublicBaseURL
+			}
+			if !httpEnv.ChatGPTCompatibleAuth() {
+				payload["chatgpt_auth_note"] = "Set ANNAS_HTTP_AUTH_MODE=none for direct ChatGPT MCP use, or put an OAuth-capable gateway in front of this server."
+			}
+
+			writeJSON(w, http.StatusOK, payload)
 		})
 	}
 
@@ -82,7 +109,10 @@ func StartHTTPServer() {
 		zap.String("transport", "streamable-http"),
 		zap.String("addr", httpEnv.Addr),
 		zap.String("path", httpEnv.Path),
-		zap.Bool("bearerAuthEnabled", httpEnv.BearerToken != ""),
+		zap.String("authMode", string(httpEnv.AuthMode)),
+		zap.Bool("chatgptAuthCompatible", httpEnv.ChatGPTCompatibleAuth()),
+		zap.Bool("bookDownloadEnabled", env.CanBookDownload()),
+		zap.Bool("articleDownloadEnabled", env.CanArticleDownload()),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -104,6 +134,15 @@ func StartHTTPServer() {
 	}
 
 	l.Info("MCP HTTP server stopped")
+}
+
+func withConfiguredAuth(httpEnv *env.HTTPEnv, next http.Handler) http.Handler {
+	switch httpEnv.AuthMode {
+	case env.HTTPAuthModeBearer:
+		return withBearerAuth(httpEnv.BearerToken, next)
+	default:
+		return next
+	}
 }
 
 func withBearerAuth(token string, next http.Handler) http.Handler {
@@ -131,11 +170,19 @@ func withBearerAuth(token string, next http.Handler) http.Handler {
 	})
 }
 
+func exposedToolNames() []string {
+	tools := []string{"book_search", "article_search"}
+	if env.CanBookDownload() {
+		tools = append(tools, "book_download")
+	}
+	if env.CanArticleDownload() {
+		tools = append(tools, "article_download")
+	}
+	return tools
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
 }
-
-
-

@@ -203,9 +203,9 @@ func StartCLI() {
 			doi := args[0]
 			l.Info("Article download command called", zap.String("doi", doi))
 
-			env, err := env.GetEnv()
+			downloadEnv, err := env.GetDownloadEnv(false)
 			if err != nil {
-				l.Error("Failed to get environment variables", zap.Error(err))
+				l.Error("Failed to get download environment variables", zap.Error(err))
 				return fmt.Errorf("failed to get environment: %w", err)
 			}
 
@@ -218,17 +218,17 @@ func StartCLI() {
 				return fmt.Errorf("DOI lookup failed: %w", err)
 			}
 
-			if paper.Hash != "" && env.SecretKey != "" {
+			if paper.Hash != "" && downloadEnv.SecretKey != "" {
 				book := &anna.Book{
 					Hash:   paper.Hash,
 					Title:  paper.Title,
 					Format: "pdf",
 				}
-				if err := book.Download(env.SecretKey, env.DownloadPath); err == nil {
-					fmt.Printf("Article downloaded successfully to: %s\n", env.DownloadPath)
+				if err := book.Download(downloadEnv.SecretKey, downloadEnv.DownloadPath); err == nil {
+					fmt.Printf("Article downloaded successfully to: %s\n", downloadEnv.DownloadPath)
 					l.Info("Article downloaded via fast download",
 						zap.String("doi", doi),
-						zap.String("path", env.DownloadPath),
+						zap.String("path", downloadEnv.DownloadPath),
 					)
 					return nil
 				}
@@ -238,7 +238,7 @@ func StartCLI() {
 				)
 			}
 
-			if err := paper.Download(env.DownloadPath); err != nil {
+			if err := paper.Download(downloadEnv.DownloadPath); err != nil {
 				l.Error("SciDB download failed",
 					zap.String("doi", doi),
 					zap.Error(err),
@@ -246,10 +246,10 @@ func StartCLI() {
 				return fmt.Errorf("download failed: %w", err)
 			}
 
-			fmt.Printf("Article downloaded successfully to: %s\n", env.DownloadPath)
+			fmt.Printf("Article downloaded successfully to: %s\n", downloadEnv.DownloadPath)
 			l.Info("Article downloaded via SciDB",
 				zap.String("doi", doi),
-				zap.String("path", env.DownloadPath),
+				zap.String("path", downloadEnv.DownloadPath),
 			)
 
 			return nil

@@ -1,21 +1,19 @@
-package anna
+﻿package anna
 
 import (
-	"fmt"
-	"net/url"
-
-	"strings"
-	"sync"
-	"time"
-
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
+	"sync"
+	"time"
 
 	colly "github.com/gocolly/colly/v2"
 	"github.com/PiefkePaul/annas-mcp/internal/env"
@@ -45,31 +43,24 @@ func extractMetaInformation(meta string) (language, format, size string) {
 		return "", "", ""
 	}
 
-	// Extract language from first part
+	// Extract language from first part.
 	languagePart := strings.TrimSpace(parts[0])
 	if idx := strings.Index(languagePart, "["); idx > 0 {
 		language = strings.TrimSpace(languagePart[:idx])
-		// Remove checkmark and leading spaces properly
 		language = strings.TrimPrefix(language, "✅")
 		language = strings.TrimSpace(language)
 	}
 
-	// Common ebook formats (case-insensitive search)
 	formatRegex := regexp.MustCompile(`(?i)\b(EPUB|PDF|MOBI|AZW3|AZW|DJVU|CBZ|CBR|FB2|DOCX?|TXT)\b`)
-
-	// Size indicators
 	sizeRegex := regexp.MustCompile(`\d+\.?\d*\s*(MB|KB|GB|TB)`)
 
-	// Search through parts for format and size
 	for i := 1; i < len(parts); i++ {
 		part := strings.TrimSpace(parts[i])
 
-		// Check for size
 		if size == "" && sizeRegex.MatchString(part) {
 			size = part
 		}
 
-		// Check for format
 		if format == "" && formatRegex.MatchString(part) {
 			matches := formatRegex.FindStringSubmatch(part)
 			if len(matches) > 0 {
@@ -77,7 +68,6 @@ func extractMetaInformation(meta string) (language, format, size string) {
 			}
 		}
 
-		// Early exit if we found both
 		if format != "" && size != "" {
 			break
 		}
@@ -86,16 +76,12 @@ func extractMetaInformation(meta string) (language, format, size string) {
 	return language, format, size
 }
 
-// sanitizeFilename removes dangerous characters and prevents path traversal
+// sanitizeFilename removes dangerous characters and prevents path traversal.
 func sanitizeFilename(filename string) string {
-	// Replace unsafe characters with underscores
 	safe := unsafeFilenameChars.ReplaceAllString(filename, "_")
-
-	// Remove any path separators and ".." sequences
 	safe = strings.ReplaceAll(safe, "..", "_")
 	safe = filepath.Base(safe)
 
-	// Limit filename length (255 is typical max, leave room for extension)
 	if len(safe) > 200 {
 		safe = safe[:200]
 	}
@@ -105,19 +91,17 @@ func sanitizeFilename(filename string) string {
 
 func FindBook(query string) ([]*Book, error) {
 	l := logger.GetLogger()
+	baseEnv := env.GetBaseEnv()
 
-	// Use mutex to protect concurrent slice access
 	var bookListMutex sync.Mutex
 	bookList := make([]*colly.HTMLElement, 0)
 
 	c := colly.NewCollector(
 		colly.Async(true),
-		// Set realistic User-Agent to avoid DDoS-Guard blocking
 		colly.UserAgent(BrowserUserAgent),
 	)
 
 	c.OnHTML("a[href^='/md5/']", func(e *colly.HTMLElement) {
-		// Only process the first link (the cover image link), not the duplicate title link
 		if e.Attr("class") == "custom-a block mr-2 sm:mr-4 hover:opacity-80" {
 			bookListMutex.Lock()
 			bookList = append(bookList, e)
@@ -129,7 +113,6 @@ func FindBook(query string) ([]*Book, error) {
 		l.Info("Visiting URL", zap.String("url", r.URL.String()))
 	})
 
-	// Add error handler
 	c.OnError(func(r *colly.Response, err error) {
 		status := 0
 		if r != nil {
@@ -141,12 +124,7 @@ func FindBook(query string) ([]*Book, error) {
 		)
 	})
 
-	env, err := env.GetEnv()
-	if err != nil {
-		return nil, err
-	}
-
-	fullURL := fmt.Sprintf(AnnasSearchEndpointFormat, env.AnnasBaseURL, url.QueryEscape(query), "book_any")
+	fullURL := fmt.Sprintf(AnnasSearchEndpointFormat, baseEnv.AnnasBaseURL, url.QueryEscape(query), "book_any")
 
 	if err := c.Visit(fullURL); err != nil {
 		l.Error("Failed to visit search URL", zap.String("url", fullURL), zap.Error(err))
@@ -156,7 +134,6 @@ func FindBook(query string) ([]*Book, error) {
 
 	bookListParsed := make([]*Book, 0)
 	for _, e := range bookList {
-		// Validate that parent and container elements exist
 		parent := e.DOM.Parent()
 		if parent.Length() == 0 {
 			l.Warn("Skipping book: no parent element found")
@@ -169,7 +146,6 @@ func FindBook(query string) ([]*Book, error) {
 			continue
 		}
 
-		// Extract title
 		titleElement := bookInfoDiv.Find("a[href^='/md5/']")
 		title := strings.TrimSpace(titleElement.Text())
 		if title == "" {
@@ -177,19 +153,15 @@ func FindBook(query string) ([]*Book, error) {
 			continue
 		}
 
-		// Extract authors (optional)
 		authorsRaw := bookInfoDiv.Find("a[href^='/search'] span.icon-\\[mdi--user-edit\\]").Parent().Text()
 		authors := strings.TrimSpace(authorsRaw)
 
-		// Extract publisher (optional)
 		publisherRaw := bookInfoDiv.Find("a[href^='/search'] span.icon-\\[mdi--company\\]").Parent().Text()
 		publisher := strings.TrimSpace(publisherRaw)
 
-		// Extract metadata
 		meta := bookInfoDiv.Find("div.text-gray-800").Text()
 		language, format, size := extractMetaInformation(meta)
 
-		// Extract link and hash
 		link := e.Attr("href")
 		if link == "" {
 			l.Warn("Skipping book: no link found", zap.String("title", title))
@@ -215,7 +187,6 @@ func FindBook(query string) ([]*Book, error) {
 		bookListParsed = append(bookListParsed, book)
 	}
 
-	// Log result count for debugging
 	l.Info("Search completed",
 		zap.Int("totalElements", len(bookList)),
 		zap.Int("validBooks", len(bookListParsed)),
@@ -226,19 +197,17 @@ func FindBook(query string) ([]*Book, error) {
 
 func FindArticle(query string) ([]*Paper, error) {
 	l := logger.GetLogger()
+	baseEnv := env.GetBaseEnv()
 
-	// Use mutex to protect concurrent slice access
 	var paperListMutex sync.Mutex
 	paperList := make([]*colly.HTMLElement, 0)
 
 	c := colly.NewCollector(
 		colly.Async(true),
-		// Set realistic User-Agent to avoid DDoS-Guard blocking
 		colly.UserAgent(BrowserUserAgent),
 	)
 
 	c.OnHTML("a[href^='/md5/']", func(e *colly.HTMLElement) {
-		// Only process the first link (the cover image link), not the duplicate title link
 		if e.Attr("class") == "custom-a block mr-2 sm:mr-4 hover:opacity-80" {
 			paperListMutex.Lock()
 			paperList = append(paperList, e)
@@ -250,7 +219,6 @@ func FindArticle(query string) ([]*Paper, error) {
 		l.Info("Visiting URL", zap.String("url", r.URL.String()))
 	})
 
-	// Add error handler
 	c.OnError(func(r *colly.Response, err error) {
 		status := 0
 		if r != nil {
@@ -262,12 +230,7 @@ func FindArticle(query string) ([]*Paper, error) {
 		)
 	})
 
-	env, err := env.GetEnv()
-	if err != nil {
-		return nil, err
-	}
-
-	fullURL := fmt.Sprintf(AnnasSearchEndpointFormat, env.AnnasBaseURL, url.QueryEscape(query), "journal")
+	fullURL := fmt.Sprintf(AnnasSearchEndpointFormat, baseEnv.AnnasBaseURL, url.QueryEscape(query), "journal")
 
 	if err := c.Visit(fullURL); err != nil {
 		l.Error("Failed to visit article search URL", zap.String("url", fullURL), zap.Error(err))
@@ -277,7 +240,6 @@ func FindArticle(query string) ([]*Paper, error) {
 
 	paperListParsed := make([]*Paper, 0)
 	for _, e := range paperList {
-		// Validate that parent and container elements exist
 		parent := e.DOM.Parent()
 		if parent.Length() == 0 {
 			l.Warn("Skipping article: no parent element found")
@@ -290,7 +252,6 @@ func FindArticle(query string) ([]*Paper, error) {
 			continue
 		}
 
-		// Extract title
 		titleElement := paperInfoDiv.Find("a[href^='/md5/']")
 		title := strings.TrimSpace(titleElement.Text())
 		if title == "" {
@@ -298,19 +259,15 @@ func FindArticle(query string) ([]*Paper, error) {
 			continue
 		}
 
-		// Extract authors (optional)
 		authorsRaw := paperInfoDiv.Find("a[href^='/search'] span.icon-\\[mdi--user-edit\\]").Parent().Text()
 		authors := strings.TrimSpace(authorsRaw)
 
-		// Extract journal/publisher (optional)
 		journalRaw := paperInfoDiv.Find("a[href^='/search'] span.icon-\\[mdi--company\\]").Parent().Text()
 		journal := strings.TrimSpace(journalRaw)
 
-		// Extract metadata
 		meta := paperInfoDiv.Find("div.text-gray-800").Text()
 		_, _, size := extractMetaInformation(meta)
 
-		// Extract link and hash
 		link := e.Attr("href")
 		if link == "" {
 			l.Warn("Skipping article: no link found", zap.String("title", title))
@@ -323,18 +280,17 @@ func FindArticle(query string) ([]*Paper, error) {
 		}
 
 		paper := &Paper{
-			Title:     title,
-			Authors:   authors,
-			Journal:   journal,
-			Size:      size,
-			Hash:      hash,
-			PageURL:   e.Request.AbsoluteURL(link),
+			Title:   title,
+			Authors: authors,
+			Journal: journal,
+			Size:    size,
+			Hash:    hash,
+			PageURL: e.Request.AbsoluteURL(link),
 		}
 
 		paperListParsed = append(paperListParsed, paper)
 	}
 
-	// Log result count for debugging
 	l.Info("Article search completed",
 		zap.Int("totalElements", len(paperList)),
 		zap.Int("validPapers", len(paperListParsed)),
@@ -345,19 +301,10 @@ func FindArticle(query string) ([]*Paper, error) {
 
 func (b *Book) Download(secretKey, folderPath string) error {
 	l := logger.GetLogger()
+	baseEnv := env.GetBaseEnv()
 
-	env, err := env.GetEnv()
-	if err != nil {
-		return fmt.Errorf("failed to get environment: %w", err)
-	}
-
-	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: HTTPTimeout,
-	}
-
-	// First API call: get download URL
-	apiURL := fmt.Sprintf(AnnasDownloadEndpointFormat, env.AnnasBaseURL, b.Hash, secretKey)
+	client := &http.Client{Timeout: HTTPTimeout}
+	apiURL := fmt.Sprintf(AnnasDownloadEndpointFormat, baseEnv.AnnasBaseURL, b.Hash, secretKey)
 
 	l.Info("Fetching download URL", zap.String("hash", b.Hash))
 
@@ -367,7 +314,6 @@ func (b *Book) Download(secretKey, folderPath string) error {
 	}
 	defer resp.Body.Close()
 
-	// Validate HTTP status code
 	if resp.StatusCode != http.StatusOK {
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
 		if readErr != nil {
@@ -388,7 +334,6 @@ func (b *Book) Download(secretKey, folderPath string) error {
 		return errors.New("API returned empty download URL")
 	}
 
-	// Second API call: download the file
 	l.Info("Downloading file", zap.String("url", apiResp.DownloadURL))
 
 	downloadResp, err := client.Get(apiResp.DownloadURL)
@@ -397,12 +342,10 @@ func (b *Book) Download(secretKey, folderPath string) error {
 	}
 	defer downloadResp.Body.Close()
 
-	// Validate download status code
 	if downloadResp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed with status %d: %s", downloadResp.StatusCode, downloadResp.Status)
 	}
 
-	// Sanitize filename to prevent path traversal and invalid characters
 	safeTitle := sanitizeFilename(b.Title)
 	if safeTitle == "" {
 		safeTitle = "untitled"
@@ -418,18 +361,15 @@ func (b *Book) Download(secretKey, folderPath string) error {
 
 	l.Info("Creating file", zap.String("path", filePath))
 
-	// Create the file
 	out, err := os.Create(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
 
-	// Setup cleanup on error
 	success := false
 	defer func() {
 		out.Close()
 		if !success {
-			// Delete partial file on failure
 			if removeErr := os.Remove(filePath); removeErr != nil {
 				l.Warn("Failed to remove partial file",
 					zap.String("path", filePath),
@@ -439,13 +379,11 @@ func (b *Book) Download(secretKey, folderPath string) error {
 		}
 	}()
 
-	// Copy the downloaded content
 	written, err := io.Copy(out, downloadResp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to write file (wrote %d bytes): %w", written, err)
 	}
 
-	// Sync to disk to ensure data is written
 	if err := out.Sync(); err != nil {
 		return fmt.Errorf("failed to sync file to disk: %w", err)
 	}
@@ -461,16 +399,9 @@ func (b *Book) Download(secretKey, folderPath string) error {
 
 func LookupDOI(doi string) (*Paper, error) {
 	l := logger.GetLogger()
-
-	env, err := env.GetEnv()
-	if err != nil {
-		return nil, err
-	}
-
+	baseEnv := env.GetBaseEnv()
 	paper := &Paper{DOI: doi}
 
-	// Phase 1: Visit /scidb/DOI which redirects to a search results page.
-	// Extract the MD5 hash from the first search result.
 	searchCollector := colly.NewCollector(
 		colly.UserAgent(BrowserUserAgent),
 	)
@@ -498,7 +429,7 @@ func LookupDOI(doi string) (*Paper, error) {
 		)
 	})
 
-	scidbURL := fmt.Sprintf(AnnasSciDBEndpointFormat, env.AnnasBaseURL, doi)
+	scidbURL := fmt.Sprintf(AnnasSciDBEndpointFormat, baseEnv.AnnasBaseURL, doi)
 	paper.PageURL = scidbURL
 
 	l.Info("Looking up DOI", zap.String("url", scidbURL))
@@ -511,7 +442,6 @@ func LookupDOI(doi string) (*Paper, error) {
 		return nil, fmt.Errorf("no paper found for DOI: %s", doi)
 	}
 
-	// Phase 2: Visit /md5/HASH to get paper details.
 	detailCollector := colly.NewCollector(
 		colly.UserAgent(BrowserUserAgent),
 	)
@@ -524,7 +454,6 @@ func LookupDOI(doi string) (*Paper, error) {
 	})
 
 	detailCollector.OnHTML("meta[name=description]", func(e *colly.HTMLElement) {
-		// Format: "Authors\n\nPublisher (ISSN)\n\nJournal, #issue, vol, pages, year"
 		desc := e.Attr("content")
 		parts := strings.Split(desc, "\n\n")
 		if len(parts) >= 3 {
@@ -536,18 +465,15 @@ func LookupDOI(doi string) (*Paper, error) {
 		}
 	})
 
-	// Extract authors from the detail page
 	detailCollector.OnHTML("a[href^='/search']", func(e *colly.HTMLElement) {
 		if paper.Authors != "" {
 			return
 		}
-		// Author links contain a span with icon-[mdi--user-edit]
 		if e.DOM.Find("span.icon-\\[mdi--user-edit\\]").Length() > 0 {
 			paper.Authors = strings.TrimSpace(e.Text)
 		}
 	})
 
-	// Extract size from metadata line
 	detailCollector.OnHTML("div.text-gray-500", func(e *colly.HTMLElement) {
 		text := e.Text
 		if strings.Contains(text, "MB") || strings.Contains(text, "KB") {
@@ -559,15 +485,13 @@ func LookupDOI(doi string) (*Paper, error) {
 		l.Warn("Failed to fetch paper details", zap.String("hash", paper.Hash), zap.Error(err))
 	})
 
-	md5URL := fmt.Sprintf("https://%s/md5/%s", env.AnnasBaseURL, paper.Hash)
+	md5URL := fmt.Sprintf("https://%s/md5/%s", baseEnv.AnnasBaseURL, paper.Hash)
 	l.Info("Fetching paper details", zap.String("url", md5URL))
 
 	if err := detailCollector.Visit(md5URL); err != nil {
 		l.Warn("Failed to visit paper detail page", zap.Error(err))
-		// Non-fatal: we still have the hash for downloading
 	}
 
-	// Set download URL for scidb (no browser verification required)
 	paper.DownloadURL = fmt.Sprintf("/scidb?doi=%s", doi)
 
 	return paper, nil
@@ -575,25 +499,18 @@ func LookupDOI(doi string) (*Paper, error) {
 
 func (p *Paper) Download(folderPath string) error {
 	l := logger.GetLogger()
+	baseEnv := env.GetBaseEnv()
 
 	if p.DownloadURL == "" {
 		return errors.New("no download URL available for this paper")
 	}
 
-	env, err := env.GetEnv()
-	if err != nil {
-		return fmt.Errorf("failed to get environment: %w", err)
-	}
-
-	// Construct full download URL
 	downloadURL := p.DownloadURL
 	if !strings.HasPrefix(downloadURL, "http") {
-		downloadURL = fmt.Sprintf("https://%s%s", env.AnnasBaseURL, downloadURL)
+		downloadURL = fmt.Sprintf("https://%s%s", baseEnv.AnnasBaseURL, downloadURL)
 	}
 
-	client := &http.Client{
-		Timeout: 2 * HTTPTimeout,
-	}
+	client := &http.Client{Timeout: 2 * HTTPTimeout}
 
 	l.Info("Downloading paper via SciDB", zap.String("url", downloadURL))
 
@@ -617,7 +534,6 @@ func (p *Paper) Download(folderPath string) error {
 		return fmt.Errorf("download failed with status %d: %s (body: %s)", resp.StatusCode, resp.Status, string(body))
 	}
 
-	// Infer file extension from Content-Disposition or Content-Type
 	ext := ".pdf"
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
 		if _, params, err := mime.ParseMediaType(cd); err == nil {
@@ -634,7 +550,6 @@ func (p *Paper) Download(folderPath string) error {
 		}
 	}
 
-	// Build filename from title or DOI
 	name := p.Title
 	if name == "" {
 		name = p.DOI
@@ -697,4 +612,3 @@ func (b *Book) ToJSON() (string, error) {
 
 	return string(data), nil
 }
-
