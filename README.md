@@ -13,6 +13,7 @@ It keeps the original CLI and stdio MCP mode, adds a native Streamable HTTP MCP 
 - ChatGPT-friendlier MCP metadata for the exposed tools
 - Search-only operation without forcing `ANNAS_SECRET_KEY`
 - Per-call download secrets for remote MCP clients instead of requiring a single server-global download key
+- Built-in OAuth account portal for per-user secret registration and secure remote MCP sign-in
 - Automatic fallback across the current official Anna's Archive mirrors
 - Embedded MCP file responses for downloads that fit within the configured inline size limit
 - `/healthz` endpoint for Docker and reverse-proxy health checks
@@ -46,10 +47,23 @@ It keeps the original CLI and stdio MCP mode, adds a native Streamable HTTP MCP 
 | --- | --- | --- |
 | `ANNAS_HTTP_ADDR` | No | Bind address for the HTTP server. Defaults to `:8080`. |
 | `ANNAS_HTTP_PATH` | No | MCP endpoint path. Defaults to `/mcp`. |
-| `ANNAS_HTTP_AUTH_MODE` | No | `none` or `bearer`. Use `none` for direct ChatGPT MCP connections. Defaults to `none`. |
+| `ANNAS_HTTP_AUTH_MODE` | No | `none`, `oauth`, or `bearer`. Use `oauth` for per-user sign-in with stored secrets. Defaults to `none`. |
 | `ANNAS_HTTP_BEARER_TOKEN` | Only if `ANNAS_HTTP_AUTH_MODE=bearer` | Bearer token for non-ChatGPT clients. |
 | `ANNAS_PUBLIC_BASE_URL` | Recommended for public deployments | Public base URL used to advertise the final connector URL in the root endpoint. |
 | `ANNAS_HTTP_PORT` | Compose only | Host port published by `compose.yaml`. Defaults to `8080`. |
+
+### OAuth / Account Variables
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `ANNAS_AUTH_MASTER_KEY` | Yes when `ANNAS_HTTP_AUTH_MODE=oauth` | Master encryption key for the on-disk auth database. Must decode to exactly 32 bytes using base64, base64url, or hex. |
+| `ANNAS_AUTH_STORE_PATH` | No | Path to the encrypted auth database that stores users, registered OAuth clients, sessions, and tokens. Defaults to `/data/auth-store.enc` in `compose.yaml`. |
+| `ANNAS_AUTH_ACCESS_TOKEN_TTL` | No | OAuth access token lifetime. Defaults to `1h`. |
+| `ANNAS_AUTH_REFRESH_TOKEN_TTL` | No | OAuth refresh token lifetime. Defaults to `720h`. |
+| `ANNAS_AUTH_CODE_TTL` | No | OAuth authorization code lifetime. Defaults to `10m`. |
+| `ANNAS_AUTH_SESSION_TTL` | No | Account portal session lifetime. Defaults to `720h`. |
+
+All stored OAuth data is encrypted at rest with the `ANNAS_AUTH_MASTER_KEY`, and account passwords are stored as bcrypt hashes instead of plaintext.
 
 ## ChatGPT / Apps SDK Notes
 
@@ -63,43 +77,46 @@ For direct ChatGPT MCP use, the current best-fit setup is:
 A few important details:
 
 - `ANNAS_SECRET_KEY` is **not** used as ChatGPT connector auth. It stays an Anna's Archive backend secret for fast downloads.
-- The built-in `bearer` mode is useful for your own MCP clients, but not the right fit for direct ChatGPT MCP connectors.
-- If you need authenticated ChatGPT access later, put an OAuth-capable gateway or proxy in front of this server instead of reusing `ANNAS_SECRET_KEY` as a client token.
+- `oauth` mode exposes a built-in account portal at `/account`, an OAuth authorization server, and encrypted storage for per-user Anna's Archive secrets.
+- The built-in `bearer` mode is useful for simple shared-token clients, but not the right fit for per-user ChatGPT or Claude access.
 - Search and download tools are always exposed.
-- `book_download` accepts `secret_key` per tool call, so multiple users can use their own Anna's Archive keys against the same remote MCP server.
+- `book_download` accepts `secret_key` per tool call, but with OAuth users usually do not need to pass it manually because the server resolves it from the signed-in account.
 - `article_download` works without a secret by falling back to SciDB, and uses `secret_key` first when one is provided.
 - Downloads are returned as embedded MCP resources when they fit within `ANNAS_MAX_INLINE_DOWNLOAD_MB`. Whether a specific client renders that as a visible attachment depends on the client.
 
 ## Docker Quick Start
 
 1. Create a local `.env` file from `.env.example`.
-2. Set `ANNAS_HTTP_AUTH_MODE=none` if you want to connect the server directly from ChatGPT.
-3. Optionally set `ANNAS_SECRET_KEY` only if you want a server-side default fast-download key. Remote clients can also pass `secret_key` per download call.
-4. Start the container:
+2. Set `ANNAS_HTTP_AUTH_MODE=oauth` if you want per-user sign-in and stored secrets, or leave it at `none` for public unauthenticated use.
+3. If you use OAuth mode, set `ANNAS_AUTH_MASTER_KEY` and keep the `/data` volume persistent.
+4. Optionally set `ANNAS_SECRET_KEY` only if you want a server-side default fast-download key. Remote clients can also pass `secret_key` per download call.
+5. Start the container:
 
 ```bash
 docker compose up -d --build
 ```
 
-5. Check that the container is healthy:
+6. Check that the container is healthy:
 
 ```bash
 curl http://localhost:8080/healthz
 ```
 
-6. Inspect the advertised deployment metadata:
+7. Inspect the advertised deployment metadata:
 
 ```bash
 curl http://localhost:8080/
 ```
 
-7. Use the MCP endpoint at:
+8. Use the MCP endpoint at:
 
 ```text
 http://localhost:8080/mcp
 ```
 
 Downloads are returned inline as embedded MCP resources when they fit within the configured size limit. A host bind mount is no longer required for the normal remote MCP flow.
+
+When `ANNAS_HTTP_AUTH_MODE=oauth`, users first create an account at `/account/register`, save their Anna's Archive secret there, and then complete OAuth from the MCP client.
 
 ## Automatic Docker Hub Publishing
 
@@ -149,6 +166,7 @@ Optional additions:
 - `ANNAS_SECRET_KEY=your-key` if you want a server-default fast-download key
 - `ANNAS_BASE_URLS=annas-archive.gl,annas-archive.pk,annas-archive.gd` to override the mirror list explicitly
 - `ANNAS_MAX_INLINE_DOWNLOAD_MB=20` to tune the maximum embedded file size
+- `ANNAS_HTTP_AUTH_MODE=oauth` plus `ANNAS_AUTH_MASTER_KEY=...` if you want per-user OAuth sign-in
 
 ## Making It Reachable From the Internet
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/PiefkePaul/annas-mcp/internal/anna"
+	"github.com/PiefkePaul/annas-mcp/internal/auth"
 	"github.com/PiefkePaul/annas-mcp/internal/env"
 	"github.com/PiefkePaul/annas-mcp/internal/logger"
 	"github.com/PiefkePaul/annas-mcp/internal/version"
@@ -15,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const serverInstructions = "Use the Anna's Archive search tools first to find books or academic papers. Download tools can return files as embedded MCP resources when the payload fits within the configured inline size limit. For book downloads, ask for the user's Anna's Archive fast-download secret key when it has not already been provided. Article downloads can fall back to SciDB when no secret key is available. The server automatically retries official Anna's Archive mirrors when one is unavailable."
+const serverInstructions = "Use the Anna's Archive search tools first to find books or academic papers. Download tools can return files as embedded MCP resources when the payload fits within the configured inline size limit. For book downloads, ask for the user's Anna's Archive fast-download secret key when it has not already been provided, unless the user has authenticated through OAuth and already registered one with the server. Article downloads can fall back to SciDB when no secret key is available. The server automatically retries official Anna's Archive mirrors when one is unavailable."
 
 func BookSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookSearchParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
@@ -45,7 +46,7 @@ func BookSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.Call
 	return textResult(formatBookResults(books)), nil
 }
 
-func BookDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookDownloadParams]) (*mcp.CallToolResultFor[any], error) {
+func bookDownloadToolWithIdentity(identity *auth.Identity, ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookDownloadParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
 
 	l.Info("Download command called",
@@ -54,9 +55,9 @@ func BookDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.Ca
 		zap.String("format", params.Arguments.Format),
 	)
 
-	secretKey := resolveSecretKey(params.Arguments.SecretKey)
+	secretKey := resolveSecretKey(params.Arguments.SecretKey, identity)
 	if secretKey == "" {
-		return nil, errors.New("book_download requires a secret_key argument or a server-side ANNAS_SECRET_KEY default")
+		return nil, errors.New("book_download requires a registered user secret, a secret_key argument, or a server-side ANNAS_SECRET_KEY default")
 	}
 
 	book := &anna.Book{
@@ -131,7 +132,7 @@ func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.C
 	return textResult(formatPaperResults(papers)), nil
 }
 
-func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleDownloadParams]) (*mcp.CallToolResultFor[any], error) {
+func articleDownloadToolWithIdentity(identity *auth.Identity, ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleDownloadParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
 	doi := strings.TrimSpace(params.Arguments.DOI)
 
@@ -146,7 +147,7 @@ func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp
 		return nil, err
 	}
 
-	secretKey := resolveSecretKey(params.Arguments.SecretKey)
+	secretKey := resolveSecretKey(params.Arguments.SecretKey, identity)
 	if paper.Hash != "" && secretKey != "" {
 		book := &anna.Book{
 			Hash:   paper.Hash,
@@ -196,7 +197,7 @@ func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp
 	return inlineFileResult(file, "Article downloaded successfully via SciDB and returned as an embedded file."), nil
 }
 
-func newMCPServer(serverVersion string) *mcp.Server {
+func newMCPServer(serverVersion string, identity *auth.Identity) *mcp.Server {
 	server := mcp.NewServer("annas-mcp", serverVersion, &mcp.ServerOptions{Instructions: serverInstructions})
 
 	bookSearchTool := mcp.NewServerTool(
@@ -223,13 +224,15 @@ func newMCPServer(serverVersion string) *mcp.Server {
 
 	bookDownloadTool := mcp.NewServerTool(
 		"book_download",
-		"Download a book file by MD5 hash. The file is returned as an embedded MCP resource when it fits within the configured inline size limit. Requires an Anna's Archive fast-download secret key, either passed as secret_key or configured server-side.",
-		BookDownloadTool,
+		"Download a book file by MD5 hash. The file is returned as an embedded MCP resource when it fits within the configured inline size limit. Requires an Anna's Archive fast-download secret key from the signed-in user account, the tool's secret_key argument, or a server-side default.",
+		func(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookDownloadParams]) (*mcp.CallToolResultFor[any], error) {
+			return bookDownloadToolWithIdentity(identity, ctx, cc, params)
+		},
 		mcp.Input(
 			mcp.Property("hash", mcp.Description("The MD5 hash returned by book_search.")),
 			mcp.Property("title", mcp.Description("Book title used to create the returned filename.")),
 			mcp.Property("format", mcp.Description("Book file format, for example pdf or epub.")),
-			mcp.Property("secret_key", mcp.Description("Anna's Archive fast-download secret key. Optional only when the server has ANNAS_SECRET_KEY configured.")),
+			mcp.Property("secret_key", mcp.Description("Optional Anna's Archive fast-download secret key. Usually not needed when the user authenticated through OAuth and stored one in the account portal.")),
 		),
 	)
 	decorateWriteTool(bookDownloadTool, "Download a book file from Anna's Archive")
@@ -238,10 +241,12 @@ func newMCPServer(serverVersion string) *mcp.Server {
 	articleDownloadTool := mcp.NewServerTool(
 		"article_download",
 		"Download an academic paper by DOI. The file is returned as an embedded MCP resource when it fits within the configured inline size limit. Optional secret_key enables Anna's fast-download path before falling back to SciDB.",
-		ArticleDownloadTool,
+		func(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleDownloadParams]) (*mcp.CallToolResultFor[any], error) {
+			return articleDownloadToolWithIdentity(identity, ctx, cc, params)
+		},
 		mcp.Input(
 			mcp.Property("doi", mcp.Description("The DOI of the paper to download, for example 10.1038/nature12345.")),
-			mcp.Property("secret_key", mcp.Description("Optional Anna's Archive fast-download secret key. Used first when available, otherwise the tool falls back to SciDB.")),
+			mcp.Property("secret_key", mcp.Description("Optional Anna's Archive fast-download secret key. Usually not needed when the user authenticated through OAuth and stored one in the account portal.")),
 		),
 	)
 	decorateWriteTool(articleDownloadTool, "Download an academic paper by DOI")
@@ -261,7 +266,7 @@ func StartMCPServer() {
 		zap.String("transport", "stdio"),
 	)
 
-	server := newMCPServer(serverVersion)
+	server := newMCPServer(serverVersion, nil)
 
 	l.Info("MCP server started successfully")
 
@@ -301,10 +306,13 @@ func inlineFileResult(file *anna.DownloadedFile, message string) *mcp.CallToolRe
 	}
 }
 
-func resolveSecretKey(provided string) string {
+func resolveSecretKey(provided string, identity *auth.Identity) string {
 	provided = strings.TrimSpace(provided)
 	if provided != "" {
 		return provided
+	}
+	if identity != nil && strings.TrimSpace(identity.SecretKey) != "" {
+		return strings.TrimSpace(identity.SecretKey)
 	}
 	return env.GetDefaultSecretKey()
 }

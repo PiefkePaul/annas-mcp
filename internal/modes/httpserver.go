@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PiefkePaul/annas-mcp/internal/auth"
 	"github.com/PiefkePaul/annas-mcp/internal/env"
 	"github.com/PiefkePaul/annas-mcp/internal/logger"
 	"github.com/PiefkePaul/annas-mcp/internal/version"
@@ -28,8 +29,28 @@ func StartHTTPServer() {
 		l.Fatal("Invalid HTTP environment", zap.Error(err))
 	}
 
+	var authManager *auth.Manager
+	if httpEnv.AuthMode == env.HTTPAuthModeOAuth {
+		authEnv, err := env.GetAuthEnv()
+		if err != nil {
+			l.Fatal("Invalid OAuth/auth environment", zap.Error(err))
+		}
+
+		authManager, err = auth.NewManager(auth.Config{
+			StorePath:            authEnv.StorePath,
+			MasterKey:            authEnv.MasterKey,
+			AccessTokenTTL:       authEnv.AccessTokenTTL,
+			RefreshTokenTTL:      authEnv.RefreshTokenTTL,
+			AuthorizationCodeTTL: authEnv.AuthorizationCodeTTL,
+			SessionTTL:           authEnv.SessionTTL,
+			MCPPath:              httpEnv.Path,
+		})
+		if err != nil {
+			l.Fatal("Failed to initialize OAuth/auth manager", zap.Error(err))
+		}
+	}
+
 	serverVersion := version.GetVersion()
-	server := newMCPServer(serverVersion)
 	availableTools := exposedToolNames()
 	baseEnv := env.GetBaseEnv()
 
@@ -40,9 +61,23 @@ func StartHTTPServer() {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle(httpEnv.Path, withConfiguredAuth(httpEnv, mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
-		return server
+	mux.Handle(httpEnv.Path, withConfiguredAuth(httpEnv, authManager, mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		return newMCPServer(serverVersion, auth.IdentityFromContext(r.Context()))
 	}, nil)))
+
+	if authManager != nil {
+		mux.HandleFunc("/.well-known/oauth-protected-resource", authManager.HandleProtectedResourceMetadata)
+		mux.HandleFunc("/.well-known/oauth-authorization-server", authManager.HandleAuthorizationServerMetadata)
+		mux.HandleFunc("/.well-known/openid-configuration", authManager.HandleOpenIDConfiguration)
+		mux.HandleFunc("/register", authManager.HandleClientRegistration)
+		mux.HandleFunc("/authorize", authManager.HandleAuthorize)
+		mux.HandleFunc("/token", authManager.HandleToken)
+		mux.HandleFunc("/account/register", authManager.HandleAccountRegister)
+		mux.HandleFunc("/account/login", authManager.HandleAccountLogin)
+		mux.HandleFunc("/account/logout", authManager.HandleAccountLogout)
+		mux.HandleFunc("/account", authManager.HandleAccount)
+	}
+
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", http.MethodGet)
@@ -86,6 +121,7 @@ func StartHTTPServer() {
 				"default_secret_configured":        env.HasDefaultSecretKey(),
 				"default_download_path_configured": env.HasDefaultDownloadPath(),
 				"inline_download_max_bytes":        env.GetMaxInlineDownloadBytes(),
+				"oauth_enabled":                    authManager != nil,
 			}
 
 			if connectorURL := httpEnv.ConnectorURL(); connectorURL != "" {
@@ -94,8 +130,14 @@ func StartHTTPServer() {
 			if httpEnv.PublicBaseURL != "" {
 				payload["public_base_url"] = httpEnv.PublicBaseURL
 			}
-			if !httpEnv.ChatGPTCompatibleAuth() {
-				payload["chatgpt_auth_note"] = "Set ANNAS_HTTP_AUTH_MODE=none for direct ChatGPT MCP use, or put an OAuth-capable gateway in front of this server."
+			if httpEnv.AuthMode == env.HTTPAuthModeBearer {
+				payload["chatgpt_auth_note"] = "Bearer mode is mainly for simple shared-token clients. Use ANNAS_HTTP_AUTH_MODE=oauth for per-user sign-in from ChatGPT or Claude."
+			}
+			if httpEnv.AuthMode == env.HTTPAuthModeOAuth {
+				payload["chatgpt_auth_note"] = "OAuth mode is enabled. Users should create an account in /account, save their Anna's Archive secret there, and then connect the MCP server from the client."
+			}
+			if authManager != nil {
+				payload["account_portal"] = "/account"
 			}
 
 			writeJSON(w, http.StatusOK, payload)
@@ -121,6 +163,7 @@ func StartHTTPServer() {
 		zap.Bool("articleDownloadEnabled", true),
 		zap.Bool("defaultSecretConfigured", env.HasDefaultSecretKey()),
 		zap.Bool("defaultDownloadPathConfigured", env.HasDefaultDownloadPath()),
+		zap.Bool("oauthEnabled", authManager != nil),
 		zap.Strings("annasMirrors", baseEnv.AnnasBaseURLs),
 	)
 
@@ -145,10 +188,12 @@ func StartHTTPServer() {
 	l.Info("MCP HTTP server stopped")
 }
 
-func withConfiguredAuth(httpEnv *env.HTTPEnv, next http.Handler) http.Handler {
+func withConfiguredAuth(httpEnv *env.HTTPEnv, authManager *auth.Manager, next http.Handler) http.Handler {
 	switch httpEnv.AuthMode {
 	case env.HTTPAuthModeBearer:
 		return withBearerAuth(httpEnv.BearerToken, next)
+	case env.HTTPAuthModeOAuth:
+		return withOAuthBearerAuth(authManager, httpEnv.Path, next)
 	default:
 		return next
 	}
@@ -176,6 +221,33 @@ func withBearerAuth(token string, next http.Handler) http.Handler {
 		}
 
 		next.ServeHTTP(w, r)
+	})
+}
+
+func withOAuthBearerAuth(authManager *auth.Manager, mcpPath string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if authManager == nil {
+			http.Error(w, "oauth auth is not configured", http.StatusInternalServerError)
+			return
+		}
+
+		authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			w.Header().Set("WWW-Authenticate", authManager.ChallengeHeader(r))
+			http.Error(w, "authorization required", http.StatusUnauthorized)
+			return
+		}
+
+		token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		resource := auth.ResourceURLForRequest(r, mcpPath)
+		identity, err := authManager.ValidateAccessToken(token, resource)
+		if err != nil {
+			w.Header().Set("WWW-Authenticate", authManager.ChallengeHeader(r))
+			http.Error(w, "invalid or expired access token", http.StatusUnauthorized)
+			return
+		}
+
+		next.ServeHTTP(w, r.WithContext(auth.WithIdentity(r.Context(), identity)))
 	})
 }
 

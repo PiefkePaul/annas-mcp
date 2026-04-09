@@ -10,3 +10,9 @@ dist
 # Runtime artifacts
 .env
 downloads/
+authdata/
+annas-auth-store.enc
+annas-auth-store.enc.tmp
+.tmp-auth/
+.tmp-auth-2/
+.tmp-auth-3/

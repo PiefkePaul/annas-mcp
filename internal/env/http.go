@@ -17,6 +17,7 @@ type HTTPAuthMode string
 const (
 	HTTPAuthModeNone   HTTPAuthMode = "none"
 	HTTPAuthModeBearer HTTPAuthMode = "bearer"
+	HTTPAuthModeOAuth  HTTPAuthMode = "oauth"
 )
 
 type HTTPEnv struct {
@@ -38,7 +39,7 @@ func GetHTTPEnv() (*HTTPEnv, error) {
 
 	authMode := normalizeHTTPAuthMode(getEnvOrDefault("ANNAS_HTTP_AUTH_MODE", ""), bearerToken)
 	if authMode == "" {
-		return nil, fmt.Errorf("ANNAS_HTTP_AUTH_MODE must be one of: %s, %s", HTTPAuthModeNone, HTTPAuthModeBearer)
+		return nil, fmt.Errorf("ANNAS_HTTP_AUTH_MODE must be one of: %s, %s, %s", HTTPAuthModeNone, HTTPAuthModeBearer, HTTPAuthModeOAuth)
 	}
 	if authMode == HTTPAuthModeBearer && bearerToken == "" {
 		return nil, fmt.Errorf("ANNAS_HTTP_BEARER_TOKEN must be set when ANNAS_HTTP_AUTH_MODE=%s", HTTPAuthModeBearer)
@@ -91,7 +92,7 @@ func normalizeHTTPAuthMode(raw string, bearerToken string) HTTPAuthMode {
 	}
 
 	switch HTTPAuthMode(raw) {
-	case HTTPAuthModeNone, HTTPAuthModeBearer:
+	case HTTPAuthModeNone, HTTPAuthModeBearer, HTTPAuthModeOAuth:
 		return HTTPAuthMode(raw)
 	default:
 		return ""
