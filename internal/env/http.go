@@ -55,7 +55,7 @@ func GetHTTPEnv() (*HTTPEnv, error) {
 }
 
 func (e *HTTPEnv) ChatGPTCompatibleAuth() bool {
-	return e.AuthMode == HTTPAuthModeNone
+	return e.AuthMode == HTTPAuthModeNone || e.AuthMode == HTTPAuthModeOAuth
 }
 
 func (e *HTTPEnv) ConnectorURL() string {

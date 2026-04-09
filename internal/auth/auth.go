@@ -305,7 +305,7 @@ func (m *Manager) cleanupLocked(now time.Time) {
 }
 
 func (m *Manager) ChallengeHeader(r *http.Request) string {
-	prmURL := baseURLFromRequest(r) + "/.well-known/oauth-protected-resource"
+	prmURL := BaseURLFromRequest(r) + "/.well-known/oauth-protected-resource"
 	return fmt.Sprintf(`Bearer realm="annas-mcp", resource_metadata="%s"`, prmURL)
 }
 
@@ -316,7 +316,7 @@ func (m *Manager) HandleProtectedResourceMetadata(w http.ResponseWriter, r *http
 		return
 	}
 
-	baseURL := baseURLFromRequest(r)
+	baseURL := BaseURLFromRequest(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"resource":              baseURL + m.cfg.MCPPath,
 		"authorization_servers": []string{baseURL},
@@ -331,7 +331,7 @@ func (m *Manager) HandleAuthorizationServerMetadata(w http.ResponseWriter, r *ht
 		return
 	}
 
-	baseURL := baseURLFromRequest(r)
+	baseURL := BaseURLFromRequest(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issuer":                                baseURL,
 		"authorization_endpoint":                baseURL + "/authorize",
@@ -1158,10 +1158,10 @@ func IdentityFromContext(ctx context.Context) *Identity {
 }
 
 func ResourceURLForRequest(r *http.Request, mcpPath string) string {
-	return baseURLFromRequest(r) + mcpPath
+	return BaseURLFromRequest(r) + mcpPath
 }
 
-func baseURLFromRequest(r *http.Request) string {
+func BaseURLFromRequest(r *http.Request) string {
 	scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
 	if scheme == "" {
 		if r.TLS != nil {

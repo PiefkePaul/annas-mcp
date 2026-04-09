@@ -16,6 +16,8 @@ It keeps the original CLI and stdio MCP mode, adds a native Streamable HTTP MCP 
 - Built-in OAuth account portal for per-user secret registration and secure remote MCP sign-in
 - Automatic fallback across the current official Anna's Archive mirrors
 - Embedded MCP file responses for downloads that fit within the configured inline size limit
+- Temporary direct download links for MCP clients that do not render embedded file attachments
+- Article download fallback to Libgen PDF mirrors before falling back to SciDB HTML pages
 - `/healthz` endpoint for Docker and reverse-proxy health checks
 - Multi-stage `Dockerfile` for container builds
 - `compose.yaml` and `.env.example` for local or hosted deployment
@@ -81,8 +83,8 @@ A few important details:
 - The built-in `bearer` mode is useful for simple shared-token clients, but not the right fit for per-user ChatGPT or Claude access.
 - Search and download tools are always exposed.
 - `book_download` accepts `secret_key` per tool call, but with OAuth users usually do not need to pass it manually because the server resolves it from the signed-in account.
-- `article_download` works without a secret by falling back to SciDB, and uses `secret_key` first when one is provided.
-- Downloads are returned as embedded MCP resources when they fit within `ANNAS_MAX_INLINE_DOWNLOAD_MB`. Whether a specific client renders that as a visible attachment depends on the client.
+- `article_download` uses Anna's fast-download path first when a secret is available, then tries Libgen PDF mirrors, and only falls back to SciDB when needed.
+- Downloads are returned as embedded MCP resources when they fit within `ANNAS_MAX_INLINE_DOWNLOAD_MB`, and the server also includes a temporary direct download URL for clients that do not render the attachment visibly.
 
 ## Docker Quick Start
 
@@ -114,7 +116,7 @@ curl http://localhost:8080/
 http://localhost:8080/mcp
 ```
 
-Downloads are returned inline as embedded MCP resources when they fit within the configured size limit. A host bind mount is no longer required for the normal remote MCP flow.
+Downloads are returned inline as embedded MCP resources when they fit within the configured size limit. The server also includes a temporary direct download URL as a fallback, so a host bind mount is no longer required for the normal remote MCP flow.
 
 When `ANNAS_HTTP_AUTH_MODE=oauth`, users first create an account at `/account/register`, save their Anna's Archive secret there, and then complete OAuth from the MCP client.
 

@@ -654,6 +654,42 @@ func (p *Paper) DownloadInline(maxBytes int64) (*DownloadedFile, error) {
 	return nil, fmt.Errorf("paper download failed on all configured Anna's Archive mirrors: %s", strings.Join(errorsByMirror, " | "))
 }
 
+func (p *Paper) DownloadInlineFromLibgen(maxBytes int64) (*DownloadedFile, error) {
+	l := logger.GetLogger()
+	if strings.TrimSpace(p.Hash) == "" {
+		return nil, errors.New("no Anna's Archive hash is available for Libgen lookup")
+	}
+
+	entryURL, err := findLibgenEntryURL(p.Hash)
+	if err != nil {
+		return nil, err
+	}
+
+	adsURL, err := findLibgenAdsURL(entryURL)
+	if err != nil {
+		return nil, err
+	}
+
+	downloadURL, err := findLibgenDirectDownloadURL(adsURL)
+	if err != nil {
+		return nil, err
+	}
+
+	file, err := downloadFromURLToMemory(&http.Client{Timeout: 2 * HTTPTimeout}, downloadURL, preferredPaperFilename(p), "libgen.li", maxBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	l.Info("Inline paper download completed successfully via Libgen",
+		zap.String("doi", p.DOI),
+		zap.String("hash", p.Hash),
+		zap.String("filename", file.Filename),
+		zap.Int64("bytes", file.Size),
+	)
+
+	return file, nil
+}
+
 func (b *Book) String() string {
 	return fmt.Sprintf("Title: %s\nAuthors: %s\nPublisher: %s\nLanguage: %s\nFormat: %s\nSize: %s\nURL: %s\nHash: %s",
 		b.Title, b.Authors, b.Publisher, b.Language, b.Format, b.Size, b.URL, b.Hash)
@@ -693,6 +729,172 @@ func withMirrorFallback[T any](operation string, fn func(host string) (T, error)
 	}
 
 	return zero, fmt.Errorf("%s failed on all configured Anna's Archive mirrors: %s", operation, strings.Join(errorsByMirror, " | "))
+}
+
+func findLibgenEntryURL(hash string) (string, error) {
+	return withMirrorFallback("Libgen entry lookup", func(host string) (string, error) {
+		return findLibgenEntryURLOnHost(host, hash)
+	})
+}
+
+func findLibgenEntryURLOnHost(host, hash string) (string, error) {
+	l := logger.GetLogger()
+	var (
+		entryURL   string
+		requestErr error
+	)
+
+	c := colly.NewCollector(
+		colly.UserAgent(BrowserUserAgent),
+	)
+
+	c.OnHTML("a[href*='libgen.li/file.php?id=']", func(e *colly.HTMLElement) {
+		if entryURL != "" {
+			return
+		}
+
+		href := strings.TrimSpace(e.Attr("href"))
+		if strings.Contains(href, "libgen.li/file.php?id=") {
+			entryURL = href
+		}
+	})
+
+	c.OnError(func(r *colly.Response, err error) {
+		status := 0
+		if r != nil {
+			status = r.StatusCode
+		}
+		if requestErr == nil {
+			requestErr = fmt.Errorf("mirror %s md5 lookup failed with status %d: %w", host, status, err)
+		}
+	})
+
+	md5URL := fmt.Sprintf("https://%s/md5/%s", host, hash)
+	l.Info("Looking up Libgen mirror entry on Anna's Archive",
+		zap.String("mirror", host),
+		zap.String("hash", hash),
+		zap.String("url", md5URL),
+	)
+
+	if err := c.Visit(md5URL); err != nil {
+		return "", fmt.Errorf("failed to visit Anna's Archive md5 page on %s: %w", host, err)
+	}
+	if requestErr != nil {
+		return "", requestErr
+	}
+	if entryURL == "" {
+		return "", fmt.Errorf("no Libgen.li entry link found for hash %s on mirror %s", hash, host)
+	}
+
+	return entryURL, nil
+}
+
+func findLibgenAdsURL(entryURL string) (string, error) {
+	l := logger.GetLogger()
+	var (
+		adsURL     string
+		requestErr error
+	)
+
+	c := colly.NewCollector(
+		colly.UserAgent(BrowserUserAgent),
+	)
+
+	c.OnHTML("a[href^='/ads.php?md5='], a[href^='ads.php?md5=']", func(e *colly.HTMLElement) {
+		if adsURL != "" {
+			return
+		}
+		adsURL = normalizeDiscoveredURL(entryURL, strings.TrimSpace(e.Attr("href")))
+	})
+
+	c.OnError(func(r *colly.Response, err error) {
+		status := 0
+		if r != nil {
+			status = r.StatusCode
+		}
+		if requestErr == nil {
+			requestErr = fmt.Errorf("Libgen entry page failed with status %d: %w", status, err)
+		}
+	})
+
+	l.Info("Fetching Libgen entry page",
+		zap.String("url", entryURL),
+	)
+
+	if err := c.Visit(entryURL); err != nil {
+		return "", fmt.Errorf("failed to visit Libgen entry page: %w", err)
+	}
+	if requestErr != nil {
+		return "", requestErr
+	}
+	if adsURL == "" {
+		return "", fmt.Errorf("no Libgen ads/download page found at %s", entryURL)
+	}
+
+	return adsURL, nil
+}
+
+func findLibgenDirectDownloadURL(adsURL string) (string, error) {
+	l := logger.GetLogger()
+	var (
+		downloadURL string
+		requestErr  error
+	)
+
+	c := colly.NewCollector(
+		colly.UserAgent(BrowserUserAgent),
+	)
+
+	c.OnHTML("a[href^='get.php?md5='], a[href^='/get.php?md5=']", func(e *colly.HTMLElement) {
+		if downloadURL != "" {
+			return
+		}
+		downloadURL = normalizeDiscoveredURL(adsURL, strings.TrimSpace(e.Attr("href")))
+	})
+
+	c.OnError(func(r *colly.Response, err error) {
+		status := 0
+		if r != nil {
+			status = r.StatusCode
+		}
+		if requestErr == nil {
+			requestErr = fmt.Errorf("Libgen ads page failed with status %d: %w", status, err)
+		}
+	})
+
+	l.Info("Fetching Libgen ads page",
+		zap.String("url", adsURL),
+	)
+
+	if err := c.Visit(adsURL); err != nil {
+		return "", fmt.Errorf("failed to visit Libgen ads page: %w", err)
+	}
+	if requestErr != nil {
+		return "", requestErr
+	}
+	if downloadURL == "" {
+		return "", fmt.Errorf("no direct Libgen download link found at %s", adsURL)
+	}
+
+	return downloadURL, nil
+}
+
+func normalizeDiscoveredURL(baseURL, raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	parsedBase, err := url.Parse(baseURL)
+	if err != nil {
+		return raw
+	}
+	parsedRaw, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+
+	return parsedBase.ResolveReference(parsedRaw).String()
 }
 
 func fetchFastDownloadURL(client *http.Client, host, hash, secretKey string) (string, error) {
@@ -894,9 +1096,15 @@ func normalizeExtension(ext, fallback string) string {
 func resolveMIMEType(resp *http.Response, filename string, data []byte) string {
 	if ct := strings.TrimSpace(resp.Header.Get("Content-Type")); ct != "" {
 		if mediaType, _, err := mime.ParseMediaType(ct); err == nil && mediaType != "" {
-			return mediaType
+			if !isGenericBinaryMIMEType(mediaType) {
+				return mediaType
+			}
+		} else {
+			mediaType = strings.TrimSpace(strings.Split(ct, ";")[0])
+			if mediaType != "" && !isGenericBinaryMIMEType(mediaType) {
+				return mediaType
+			}
 		}
-		return strings.TrimSpace(strings.Split(ct, ";")[0])
 	}
 
 	if ext := strings.ToLower(filepath.Ext(filename)); ext != "" {
@@ -910,6 +1118,15 @@ func resolveMIMEType(resp *http.Response, filename string, data []byte) string {
 	}
 
 	return DefaultBinaryMIMEType
+}
+
+func isGenericBinaryMIMEType(mimeType string) bool {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "", DefaultBinaryMIMEType, "binary/octet-stream":
+		return true
+	default:
+		return false
+	}
 }
 
 func preferredBookFilename(b *Book) string {

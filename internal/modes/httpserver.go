@@ -53,6 +53,7 @@ func StartHTTPServer() {
 	serverVersion := version.GetVersion()
 	availableTools := exposedToolNames()
 	baseEnv := env.GetBaseEnv()
+	downloadStore := newEphemeralDownloadStore(defaultEphemeralDownloadTTL)
 
 	if !httpEnv.ChatGPTCompatibleAuth() {
 		l.Warn("Bearer auth is enabled. ChatGPT MCP connectors currently expect no auth or OAuth rather than a custom bearer token.",
@@ -62,8 +63,14 @@ func StartHTTPServer() {
 
 	mux := http.NewServeMux()
 	mux.Handle(httpEnv.Path, withConfiguredAuth(httpEnv, authManager, mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		return newMCPServer(serverVersion, auth.IdentityFromContext(r.Context()))
+		return newMCPServer(
+			serverVersion,
+			auth.IdentityFromContext(r.Context()),
+			downloadStore,
+			effectiveBaseURL(httpEnv, r),
+		)
 	}, nil)))
+	mux.HandleFunc("/downloads/", downloadStore.HandleDownload)
 
 	if authManager != nil {
 		mux.HandleFunc("/.well-known/oauth-protected-resource", authManager.HandleProtectedResourceMetadata)
@@ -122,6 +129,7 @@ func StartHTTPServer() {
 				"default_download_path_configured": env.HasDefaultDownloadPath(),
 				"inline_download_max_bytes":        env.GetMaxInlineDownloadBytes(),
 				"oauth_enabled":                    authManager != nil,
+				"temporary_download_links_enabled": true,
 			}
 
 			if connectorURL := httpEnv.ConnectorURL(); connectorURL != "" {
@@ -259,4 +267,11 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func effectiveBaseURL(httpEnv *env.HTTPEnv, r *http.Request) string {
+	if httpEnv != nil && strings.TrimSpace(httpEnv.PublicBaseURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(httpEnv.PublicBaseURL), "/")
+	}
+	return auth.BaseURLFromRequest(r)
 }
