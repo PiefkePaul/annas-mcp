@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const serverInstructions = "Use the Anna's Archive search tools first to find books or academic papers. Download tools can return files as embedded MCP resources when the payload fits within the configured inline size limit. For book downloads, ask for the user's Anna's Archive fast-download secret key when it has not already been provided, unless the user has authenticated through OAuth and already registered one with the server. Article downloads can fall back to SciDB when no secret key is available. The server automatically retries official Anna's Archive mirrors when one is unavailable."
+const serverInstructions = "Use the Anna's Archive search tools first to find books or academic papers. Download tools return a temporary direct download URL in the tool result, and some local MCP clients may additionally receive an embedded file attachment when supported. For book downloads, ask for the user's Anna's Archive fast-download secret key when it has not already been provided, unless the user has authenticated through OAuth and already registered one with the server. Article downloads can fall back to Libgen or SciDB when no fast download is available. The server automatically retries official Anna's Archive mirrors when one is unavailable."
 
 func BookSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookSearchParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
@@ -46,7 +46,7 @@ func BookSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.Call
 	return textResult(formatBookResults(books)), nil
 }
 
-func bookDownloadToolWithIdentity(identity *auth.Identity, downloadStore *ephemeralDownloadStore, baseURL string, ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookDownloadParams]) (*mcp.CallToolResultFor[any], error) {
+func bookDownloadToolWithIdentity(identity *auth.Identity, downloadStore *ephemeralDownloadStore, baseURL string, includeEmbeddedResource bool, ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookDownloadParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
 
 	l.Info("Download command called",
@@ -85,7 +85,21 @@ func bookDownloadToolWithIdentity(identity *auth.Identity, downloadStore *epheme
 		zap.Int64("bytes", file.Size),
 	)
 
-	return inlineFileResult(file, "Book downloaded successfully and returned as an embedded file.", downloadStore.CreateDownloadURL(baseURL, file)), nil
+	downloadURL := downloadStore.CreateDownloadURL(baseURL, file)
+	if downloadURL == "" {
+		l.Warn("Book download completed without a temporary direct download URL",
+			zap.String("bookHash", params.Arguments.BookHash),
+			zap.String("filename", file.Filename),
+		)
+	} else {
+		l.Info("Book download direct URL prepared",
+			zap.String("bookHash", params.Arguments.BookHash),
+			zap.String("filename", file.Filename),
+			zap.String("downloadURL", downloadURL),
+		)
+	}
+
+	return inlineFileResult(file, "Book downloaded successfully and prepared for download.", downloadURL, includeEmbeddedResource), nil
 }
 
 func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleSearchParams]) (*mcp.CallToolResultFor[any], error) {
@@ -132,7 +146,7 @@ func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.C
 	return textResult(formatPaperResults(papers)), nil
 }
 
-func articleDownloadToolWithIdentity(identity *auth.Identity, downloadStore *ephemeralDownloadStore, baseURL string, ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleDownloadParams]) (*mcp.CallToolResultFor[any], error) {
+func articleDownloadToolWithIdentity(identity *auth.Identity, downloadStore *ephemeralDownloadStore, baseURL string, includeEmbeddedResource bool, ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleDownloadParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
 	doi := strings.TrimSpace(params.Arguments.DOI)
 
@@ -166,12 +180,14 @@ func articleDownloadToolWithIdentity(identity *auth.Identity, downloadStore *eph
 				zap.Error(err),
 			)
 		} else {
+			downloadURL := downloadStore.CreateDownloadURL(baseURL, file)
 			l.Info("Paper downloaded via fast download",
 				zap.String("doi", doi),
 				zap.String("filename", file.Filename),
 				zap.Int64("bytes", file.Size),
+				zap.String("downloadURL", downloadURL),
 			)
-			return inlineFileResult(file, "Article downloaded successfully via fast download and returned as an embedded file.", downloadStore.CreateDownloadURL(baseURL, file)), nil
+			return inlineFileResult(file, "Article downloaded successfully via fast download and prepared for download.", downloadURL, includeEmbeddedResource), nil
 		}
 	}
 
@@ -187,12 +203,14 @@ func articleDownloadToolWithIdentity(identity *auth.Identity, downloadStore *eph
 				zap.Error(err),
 			)
 		} else {
+			downloadURL := downloadStore.CreateDownloadURL(baseURL, file)
 			l.Info("Paper downloaded via Libgen fallback",
 				zap.String("doi", doi),
 				zap.String("filename", file.Filename),
 				zap.Int64("bytes", file.Size),
+				zap.String("downloadURL", downloadURL),
 			)
-			return inlineFileResult(file, "Article downloaded successfully via Libgen fallback and returned as an embedded file.", downloadStore.CreateDownloadURL(baseURL, file)), nil
+			return inlineFileResult(file, "Article downloaded successfully via Libgen fallback and prepared for download.", downloadURL, includeEmbeddedResource), nil
 		}
 	}
 
@@ -209,16 +227,18 @@ func articleDownloadToolWithIdentity(identity *auth.Identity, downloadStore *eph
 		return nil, err
 	}
 
+	downloadURL := downloadStore.CreateDownloadURL(baseURL, file)
 	l.Info("Paper downloaded via SciDB",
 		zap.String("doi", doi),
 		zap.String("filename", file.Filename),
 		zap.Int64("bytes", file.Size),
+		zap.String("downloadURL", downloadURL),
 	)
 
-	return inlineFileResult(file, "Article downloaded successfully via SciDB and returned as an embedded file.", downloadStore.CreateDownloadURL(baseURL, file)), nil
+	return inlineFileResult(file, "Article downloaded successfully via SciDB and prepared for download.", downloadURL, includeEmbeddedResource), nil
 }
 
-func newMCPServer(serverVersion string, identity *auth.Identity, downloadStore *ephemeralDownloadStore, baseURL string) *mcp.Server {
+func newMCPServer(serverVersion string, identity *auth.Identity, downloadStore *ephemeralDownloadStore, baseURL string, includeEmbeddedResource bool) *mcp.Server {
 	server := mcp.NewServer("annas-mcp", serverVersion, &mcp.ServerOptions{Instructions: serverInstructions})
 
 	bookSearchTool := mcp.NewServerTool(
@@ -245,9 +265,9 @@ func newMCPServer(serverVersion string, identity *auth.Identity, downloadStore *
 
 	bookDownloadTool := mcp.NewServerTool(
 		"book_download",
-		"Download a book file by MD5 hash. The file is returned as an embedded MCP resource when it fits within the configured inline size limit, and the server also provides a temporary direct download URL as a fallback for clients that do not render file attachments. Requires an Anna's Archive fast-download secret key from the signed-in user account, the tool's secret_key argument, or a server-side default.",
+		"Download a book file by MD5 hash. The server returns a temporary direct download URL in the tool result, and local MCP clients can additionally receive an embedded file attachment when supported. Requires an Anna's Archive fast-download secret key from the signed-in user account, the tool's secret_key argument, or a server-side default.",
 		func(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookDownloadParams]) (*mcp.CallToolResultFor[any], error) {
-			return bookDownloadToolWithIdentity(identity, downloadStore, baseURL, ctx, cc, params)
+			return bookDownloadToolWithIdentity(identity, downloadStore, baseURL, includeEmbeddedResource, ctx, cc, params)
 		},
 		mcp.Input(
 			mcp.Property("hash", mcp.Description("The MD5 hash returned by book_search.")),
@@ -256,21 +276,21 @@ func newMCPServer(serverVersion string, identity *auth.Identity, downloadStore *
 			mcp.Property("secret_key", mcp.Description("Optional Anna's Archive fast-download secret key. Usually not needed when the user authenticated through OAuth and stored one in the account portal.")),
 		),
 	)
-	decorateWriteTool(bookDownloadTool, "Download a book file from Anna's Archive")
+	decorateReadOnlyTool(bookDownloadTool, "Download a book file from Anna's Archive")
 	server.AddTools(bookDownloadTool)
 
 	articleDownloadTool := mcp.NewServerTool(
 		"article_download",
-		"Download an academic paper by DOI. The file is returned as an embedded MCP resource when it fits within the configured inline size limit, and the server also provides a temporary direct download URL as a fallback for clients that do not render file attachments. Optional secret_key enables Anna's fast-download path before falling back to SciDB.",
+		"Download an academic paper by DOI. The server returns a temporary direct download URL in the tool result, and local MCP clients can additionally receive an embedded file attachment when supported. Optional secret_key enables Anna's fast-download path before falling back to Libgen and SciDB.",
 		func(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleDownloadParams]) (*mcp.CallToolResultFor[any], error) {
-			return articleDownloadToolWithIdentity(identity, downloadStore, baseURL, ctx, cc, params)
+			return articleDownloadToolWithIdentity(identity, downloadStore, baseURL, includeEmbeddedResource, ctx, cc, params)
 		},
 		mcp.Input(
 			mcp.Property("doi", mcp.Description("The DOI of the paper to download, for example 10.1038/nature12345.")),
 			mcp.Property("secret_key", mcp.Description("Optional Anna's Archive fast-download secret key. Usually not needed when the user authenticated through OAuth and stored one in the account portal.")),
 		),
 	)
-	decorateWriteTool(articleDownloadTool, "Download an academic paper by DOI")
+	decorateReadOnlyTool(articleDownloadTool, "Download an academic paper by DOI")
 	server.AddTools(articleDownloadTool)
 
 	return server
@@ -287,7 +307,7 @@ func StartMCPServer() {
 		zap.String("transport", "stdio"),
 	)
 
-	server := newMCPServer(serverVersion, nil, nil, "")
+	server := newMCPServer(serverVersion, nil, nil, "", true)
 
 	l.Info("MCP server started successfully")
 
@@ -302,7 +322,7 @@ func textResult(text string) *mcp.CallToolResultFor[any] {
 	}
 }
 
-func inlineFileResult(file *anna.DownloadedFile, message string, downloadURL string) *mcp.CallToolResultFor[any] {
+func inlineFileResult(file *anna.DownloadedFile, message string, downloadURL string, includeEmbeddedResource bool) *mcp.CallToolResultFor[any] {
 	resourceURI := "annas://download/" + url.PathEscape(file.Filename)
 	text := fmt.Sprintf("%s\nFilename: %s\nMIME type: %s\nSize: %d bytes\nMirror: %s",
 		message,
@@ -320,7 +340,7 @@ func inlineFileResult(file *anna.DownloadedFile, message string, downloadURL str
 			Text: text,
 		},
 	}
-	if strings.TrimSpace(downloadURL) != "" {
+	if strings.TrimSpace(downloadURL) != "" && includeEmbeddedResource {
 		size := file.Size
 		content = append(content, &mcp.ResourceLink{
 			URI:         downloadURL,
@@ -331,13 +351,15 @@ func inlineFileResult(file *anna.DownloadedFile, message string, downloadURL str
 			Size:        &size,
 		})
 	}
-	content = append(content, &mcp.EmbeddedResource{
-		Resource: &mcp.ResourceContents{
-			URI:      resourceURI,
-			MIMEType: file.MIMEType,
-			Blob:     file.Data,
-		},
-	})
+	if includeEmbeddedResource {
+		content = append(content, &mcp.EmbeddedResource{
+			Resource: &mcp.ResourceContents{
+				URI:      resourceURI,
+				MIMEType: file.MIMEType,
+				Blob:     file.Data,
+			},
+		})
+	}
 
 	return &mcp.CallToolResultFor[any]{
 		StructuredContent: map[string]any{

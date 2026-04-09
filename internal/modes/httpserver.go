@@ -68,6 +68,7 @@ func StartHTTPServer() {
 			auth.IdentityFromContext(r.Context()),
 			downloadStore,
 			effectiveBaseURL(httpEnv, r),
+			false,
 		)
 	}, nil)))
 	mux.HandleFunc("/downloads/", downloadStore.HandleDownload)
@@ -130,6 +131,7 @@ func StartHTTPServer() {
 				"inline_download_max_bytes":        env.GetMaxInlineDownloadBytes(),
 				"oauth_enabled":                    authManager != nil,
 				"temporary_download_links_enabled": true,
+				"embedded_downloads_enabled":       false,
 			}
 
 			if connectorURL := httpEnv.ConnectorURL(); connectorURL != "" {

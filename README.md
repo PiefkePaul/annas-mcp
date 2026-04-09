@@ -15,7 +15,7 @@ It keeps the original CLI and stdio MCP mode, adds a native Streamable HTTP MCP 
 - Per-call download secrets for remote MCP clients instead of requiring a single server-global download key
 - Built-in OAuth account portal for per-user secret registration and secure remote MCP sign-in
 - Automatic fallback across the current official Anna's Archive mirrors
-- Embedded MCP file responses for downloads that fit within the configured inline size limit
+- Embedded MCP file responses for local clients that support them
 - Temporary direct download links for MCP clients that do not render embedded file attachments
 - Article download fallback to Libgen PDF mirrors before falling back to SciDB HTML pages
 - `/healthz` endpoint for Docker and reverse-proxy health checks
@@ -84,7 +84,7 @@ A few important details:
 - Search and download tools are always exposed.
 - `book_download` accepts `secret_key` per tool call, but with OAuth users usually do not need to pass it manually because the server resolves it from the signed-in account.
 - `article_download` uses Anna's fast-download path first when a secret is available, then tries Libgen PDF mirrors, and only falls back to SciDB when needed.
-- Downloads are returned as embedded MCP resources when they fit within `ANNAS_MAX_INLINE_DOWNLOAD_MB`, and the server also includes a temporary direct download URL for clients that do not render the attachment visibly.
+- Remote HTTP clients receive a text result with a temporary direct download URL for maximum ChatGPT/Claude compatibility. Local stdio MCP clients can additionally receive embedded file attachments when supported.
 
 ## Docker Quick Start
 
