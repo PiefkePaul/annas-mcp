@@ -502,7 +502,18 @@ func (m *Manager) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.FormValue("action") != "approve" {
-		redirectWithOAuthError(w, r, params.RedirectURI, "access_denied", params.State)
+		target, buildErr := buildOAuthErrorRedirectURL(params.RedirectURI, "access_denied", params.State)
+		if buildErr != nil {
+			http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+			return
+		}
+		logger.GetLogger().Info("Denied OAuth authorization request",
+			zap.String("clientID", client.ID),
+			zap.String("userID", identity.UserID),
+			zap.String("redirectURI", params.RedirectURI),
+			zap.String("redirectTarget", target),
+		)
+		completeBrowserRedirect(w, r, target, "Access denied")
 		return
 	}
 
@@ -516,16 +527,20 @@ func (m *Manager) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		zap.String("clientID", client.ID),
 		zap.String("userID", identity.UserID),
 		zap.String("resource", params.Resource),
+		zap.String("redirectURI", params.RedirectURI),
 	)
 
-	redirectURL, _ := url.Parse(params.RedirectURI)
-	query := redirectURL.Query()
-	query.Set("code", code)
-	if params.State != "" {
-		query.Set("state", params.State)
+	target, err := buildOAuthCodeRedirectURL(params.RedirectURI, code, params.State)
+	if err != nil {
+		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+		return
 	}
-	redirectURL.RawQuery = query.Encode()
-	http.Redirect(w, r, redirectURL.String(), http.StatusFound)
+	logger.GetLogger().Info("Redirecting OAuth authorization response",
+		zap.String("clientID", client.ID),
+		zap.String("userID", identity.UserID),
+		zap.String("redirectTarget", target),
+	)
+	completeBrowserRedirect(w, r, target, "Authorization complete")
 }
 
 func (m *Manager) parseAuthorizeRequest(values url.Values) (*authorizeParams, *clientRecord, error) {
@@ -642,6 +657,12 @@ func (m *Manager) handleAuthorizationCodeExchange(w http.ResponseWriter, r *http
 
 	response, err := m.exchangeAuthorizationCode(clientID, code, redirectURI, codeVerifier, resource)
 	if err != nil {
+		logger.GetLogger().Warn("OAuth authorization code exchange failed",
+			zap.String("clientID", clientID),
+			zap.String("redirectURI", redirectURI),
+			zap.String("resource", resource),
+			zap.Error(err),
+		)
 		switch {
 		case errors.Is(err, ErrInvalidClient):
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_client", err.Error())
@@ -653,6 +674,11 @@ func (m *Manager) handleAuthorizationCodeExchange(w http.ResponseWriter, r *http
 		return
 	}
 
+	logger.GetLogger().Info("OAuth authorization code exchanged successfully",
+		zap.String("clientID", clientID),
+		zap.String("redirectURI", redirectURI),
+		zap.String("resource", resource),
+	)
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -706,6 +732,11 @@ func (m *Manager) handleRefreshTokenExchange(w http.ResponseWriter, r *http.Requ
 
 	response, err := m.refreshToken(clientID, refreshToken, resource)
 	if err != nil {
+		logger.GetLogger().Warn("OAuth refresh token exchange failed",
+			zap.String("clientID", clientID),
+			zap.String("resource", resource),
+			zap.Error(err),
+		)
 		switch {
 		case errors.Is(err, ErrInvalidClient):
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_client", err.Error())
@@ -717,6 +748,10 @@ func (m *Manager) handleRefreshTokenExchange(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	logger.GetLogger().Info("OAuth refresh token exchange succeeded",
+		zap.String("clientID", clientID),
+		zap.String("resource", resource),
+	)
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -1301,11 +1336,24 @@ func sanitizeNext(next string) string {
 	return next
 }
 
-func redirectWithOAuthError(w http.ResponseWriter, r *http.Request, redirectURI, errCode, state string) {
-	u, parseErr := url.Parse(redirectURI)
-	if parseErr != nil {
-		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
-		return
+func buildOAuthCodeRedirectURL(redirectURI, code, state string) (string, error) {
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		return "", err
+	}
+	query := u.Query()
+	query.Set("code", code)
+	if state != "" {
+		query.Set("state", state)
+	}
+	u.RawQuery = query.Encode()
+	return u.String(), nil
+}
+
+func buildOAuthErrorRedirectURL(redirectURI, errCode, state string) (string, error) {
+	u, err := url.Parse(redirectURI)
+	if err != nil {
+		return "", err
 	}
 	query := u.Query()
 	query.Set("error", errCode)
@@ -1313,7 +1361,11 @@ func redirectWithOAuthError(w http.ResponseWriter, r *http.Request, redirectURI,
 		query.Set("state", state)
 	}
 	u.RawQuery = query.Encode()
-	http.Redirect(w, r, u.String(), http.StatusFound)
+	return u.String(), nil
+}
+
+func completeBrowserRedirect(w http.ResponseWriter, r *http.Request, targetURL, title string) {
+	renderRedirectHTML(w, title, targetURL)
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, errCode, description string) {
@@ -1339,6 +1391,21 @@ func renderHTML(w http.ResponseWriter, tmpl string, data map[string]any) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; img-src 'self' data:; frame-ancestors 'none'")
 	_ = t.Execute(w, data)
+}
+
+func renderRedirectHTML(w http.ResponseWriter, title, targetURL string) {
+	t := template.Must(template.New("redirect").Parse(redirectTemplate))
+	w.Header().Set("Location", targetURL)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	_ = t.Execute(w, map[string]any{
+		"Title":     title,
+		"TargetURL": targetURL,
+	})
 }
 
 func setNoStoreHeaders(w http.ResponseWriter) {
@@ -1465,4 +1532,46 @@ const authorizeTemplate = `
 </form>
 {{end}}
 {{template "layout" .}}
+`
+
+const redirectTemplate = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}}</title>
+  <meta http-equiv="refresh" content="0;url={{.TargetURL}}">
+  <style>
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: #f7f7f5; color: #1f2937; margin: 0; }
+    main { max-width: 720px; margin: 48px auto; background: white; padding: 32px; border-radius: 18px; box-shadow: 0 18px 40px rgba(0,0,0,.08); }
+    a { color: #1d4ed8; }
+    code { background: #f3f4f6; padding: 2px 6px; border-radius: 6px; word-break: break-all; }
+    .muted { color: #6b7280; }
+  </style>
+  <script>
+    (function () {
+      var target = {{printf "%q" .TargetURL}};
+      try { window.location.replace(target); } catch (e) {}
+      try {
+        if (window.top && window.top !== window) {
+          window.top.location.href = target;
+          return;
+        }
+      } catch (e) {}
+      setTimeout(function () {
+        try { window.location.href = target; } catch (e) {}
+      }, 50);
+    }());
+  </script>
+</head>
+<body>
+  <main>
+    <h1>{{.Title}}</h1>
+    <p class="muted">If the app does not continue automatically, use the link below.</p>
+    <p><a href="{{.TargetURL}}">Continue back to the app</a></p>
+    <p><code>{{.TargetURL}}</code></p>
+  </main>
+</body>
+</html>
 `
