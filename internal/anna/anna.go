@@ -1,4 +1,4 @@
-﻿package anna
+package anna
 
 import (
 	"encoding/json"
@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	colly "github.com/gocolly/colly/v2"
 	"github.com/PiefkePaul/annas-mcp/internal/env"
 	"github.com/PiefkePaul/annas-mcp/internal/logger"
+	colly "github.com/gocolly/colly/v2"
 	"go.uber.org/zap"
 )
 
@@ -27,23 +27,23 @@ const (
 	AnnasDownloadEndpointFormat = "https://%s/dyn/api/fast_download.json?md5=%s&key=%s"
 	HTTPTimeout                 = 30 * time.Second
 	BrowserUserAgent            = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	DefaultBinaryExtension      = ".bin"
+	DefaultBinaryMIMEType       = "application/octet-stream"
 )
 
 var (
-	// Regex to sanitize filenames - removes dangerous characters
+	ErrInlineDownloadTooLarge = errors.New("download exceeds inline size limit")
+
+	// Regex to sanitize filenames - removes dangerous characters.
 	unsafeFilenameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
 )
 
 func extractMetaInformation(meta string) (language, format, size string) {
-	// The meta format may be:
-	// - "✅ English [en] · EPUB · 0.7MB · 2015 · ..."
-	// - "✅ English [en] · Hindi [hi] · EPUB · 0.7MB · ..."
 	parts := strings.Split(meta, " · ")
 	if len(parts) < 3 {
 		return "", "", ""
 	}
 
-	// Extract language from first part.
 	languagePart := strings.TrimSpace(parts[0])
 	if idx := strings.Index(languagePart, "["); idx > 0 {
 		language = strings.TrimSpace(languagePart[:idx])
@@ -76,7 +76,6 @@ func extractMetaInformation(meta string) (language, format, size string) {
 	return language, format, size
 }
 
-// sanitizeFilename removes dangerous characters and prevents path traversal.
 func sanitizeFilename(filename string) string {
 	safe := unsafeFilenameChars.ReplaceAllString(filename, "_")
 	safe = strings.ReplaceAll(safe, "..", "_")
@@ -90,11 +89,19 @@ func sanitizeFilename(filename string) string {
 }
 
 func FindBook(query string) ([]*Book, error) {
-	l := logger.GetLogger()
-	baseEnv := env.GetBaseEnv()
+	return withMirrorFallback("book search", func(host string) ([]*Book, error) {
+		return findBooksOnHost(host, query)
+	})
+}
 
-	var bookListMutex sync.Mutex
-	bookList := make([]*colly.HTMLElement, 0)
+func findBooksOnHost(host string, query string) ([]*Book, error) {
+	l := logger.GetLogger()
+
+	var (
+		bookListMutex sync.Mutex
+		bookList      = make([]*colly.HTMLElement, 0)
+		requestErr    error
+	)
 
 	c := colly.NewCollector(
 		colly.Async(true),
@@ -110,7 +117,10 @@ func FindBook(query string) ([]*Book, error) {
 	})
 
 	c.OnRequest(func(r *colly.Request) {
-		l.Info("Visiting URL", zap.String("url", r.URL.String()))
+		l.Info("Visiting Anna's Archive search URL",
+			zap.String("mirror", host),
+			zap.String("url", r.URL.String()),
+		)
 	})
 
 	c.OnError(func(r *colly.Response, err error) {
@@ -118,38 +128,50 @@ func FindBook(query string) ([]*Book, error) {
 		if r != nil {
 			status = r.StatusCode
 		}
+		if requestErr == nil {
+			requestErr = fmt.Errorf("mirror %s search failed with status %d: %w", host, status, err)
+		}
 		l.Error("Search request failed",
+			zap.String("mirror", host),
 			zap.Int("statusCode", status),
 			zap.Error(err),
 		)
 	})
 
-	fullURL := fmt.Sprintf(AnnasSearchEndpointFormat, baseEnv.AnnasBaseURL, url.QueryEscape(query), "book_any")
+	fullURL := fmt.Sprintf(AnnasSearchEndpointFormat, host, url.QueryEscape(query), "book_any")
 
 	if err := c.Visit(fullURL); err != nil {
-		l.Error("Failed to visit search URL", zap.String("url", fullURL), zap.Error(err))
-		return nil, fmt.Errorf("failed to visit search URL: %w", err)
+		l.Error("Failed to visit search URL",
+			zap.String("mirror", host),
+			zap.String("url", fullURL),
+			zap.Error(err),
+		)
+		return nil, fmt.Errorf("failed to visit search URL on %s: %w", host, err)
 	}
 	c.Wait()
 
-	bookListParsed := make([]*Book, 0)
+	if requestErr != nil {
+		return nil, requestErr
+	}
+
+	bookListParsed := make([]*Book, 0, len(bookList))
 	for _, e := range bookList {
 		parent := e.DOM.Parent()
 		if parent.Length() == 0 {
-			l.Warn("Skipping book: no parent element found")
+			l.Warn("Skipping book: no parent element found", zap.String("mirror", host))
 			continue
 		}
 
 		bookInfoDiv := parent.Find("div.max-w-full")
 		if bookInfoDiv.Length() == 0 {
-			l.Warn("Skipping book: book info container not found")
+			l.Warn("Skipping book: book info container not found", zap.String("mirror", host))
 			continue
 		}
 
 		titleElement := bookInfoDiv.Find("a[href^='/md5/']")
 		title := strings.TrimSpace(titleElement.Text())
 		if title == "" {
-			l.Warn("Skipping book: title is empty")
+			l.Warn("Skipping book: title is empty", zap.String("mirror", host))
 			continue
 		}
 
@@ -164,16 +186,22 @@ func FindBook(query string) ([]*Book, error) {
 
 		link := e.Attr("href")
 		if link == "" {
-			l.Warn("Skipping book: no link found", zap.String("title", title))
+			l.Warn("Skipping book: no link found",
+				zap.String("mirror", host),
+				zap.String("title", title),
+			)
 			continue
 		}
 		hash := strings.TrimPrefix(link, "/md5/")
 		if hash == "" {
-			l.Warn("Skipping book: no hash found", zap.String("title", title))
+			l.Warn("Skipping book: no hash found",
+				zap.String("mirror", host),
+				zap.String("title", title),
+			)
 			continue
 		}
 
-		book := &Book{
+		bookListParsed = append(bookListParsed, &Book{
 			Language:  language,
 			Format:    format,
 			Size:      size,
@@ -182,12 +210,11 @@ func FindBook(query string) ([]*Book, error) {
 			Authors:   authors,
 			URL:       e.Request.AbsoluteURL(link),
 			Hash:      hash,
-		}
-
-		bookListParsed = append(bookListParsed, book)
+		})
 	}
 
-	l.Info("Search completed",
+	l.Info("Book search completed",
+		zap.String("mirror", host),
 		zap.Int("totalElements", len(bookList)),
 		zap.Int("validBooks", len(bookListParsed)),
 	)
@@ -196,11 +223,19 @@ func FindBook(query string) ([]*Book, error) {
 }
 
 func FindArticle(query string) ([]*Paper, error) {
-	l := logger.GetLogger()
-	baseEnv := env.GetBaseEnv()
+	return withMirrorFallback("article search", func(host string) ([]*Paper, error) {
+		return findArticlesOnHost(host, query)
+	})
+}
 
-	var paperListMutex sync.Mutex
-	paperList := make([]*colly.HTMLElement, 0)
+func findArticlesOnHost(host string, query string) ([]*Paper, error) {
+	l := logger.GetLogger()
+
+	var (
+		paperListMutex sync.Mutex
+		paperList      = make([]*colly.HTMLElement, 0)
+		requestErr     error
+	)
 
 	c := colly.NewCollector(
 		colly.Async(true),
@@ -216,7 +251,10 @@ func FindArticle(query string) ([]*Paper, error) {
 	})
 
 	c.OnRequest(func(r *colly.Request) {
-		l.Info("Visiting URL", zap.String("url", r.URL.String()))
+		l.Info("Visiting Anna's Archive article search URL",
+			zap.String("mirror", host),
+			zap.String("url", r.URL.String()),
+		)
 	})
 
 	c.OnError(func(r *colly.Response, err error) {
@@ -224,38 +262,50 @@ func FindArticle(query string) ([]*Paper, error) {
 		if r != nil {
 			status = r.StatusCode
 		}
+		if requestErr == nil {
+			requestErr = fmt.Errorf("mirror %s article search failed with status %d: %w", host, status, err)
+		}
 		l.Error("Article search request failed",
+			zap.String("mirror", host),
 			zap.Int("statusCode", status),
 			zap.Error(err),
 		)
 	})
 
-	fullURL := fmt.Sprintf(AnnasSearchEndpointFormat, baseEnv.AnnasBaseURL, url.QueryEscape(query), "journal")
+	fullURL := fmt.Sprintf(AnnasSearchEndpointFormat, host, url.QueryEscape(query), "journal")
 
 	if err := c.Visit(fullURL); err != nil {
-		l.Error("Failed to visit article search URL", zap.String("url", fullURL), zap.Error(err))
-		return nil, fmt.Errorf("failed to visit article search URL: %w", err)
+		l.Error("Failed to visit article search URL",
+			zap.String("mirror", host),
+			zap.String("url", fullURL),
+			zap.Error(err),
+		)
+		return nil, fmt.Errorf("failed to visit article search URL on %s: %w", host, err)
 	}
 	c.Wait()
 
-	paperListParsed := make([]*Paper, 0)
+	if requestErr != nil {
+		return nil, requestErr
+	}
+
+	paperListParsed := make([]*Paper, 0, len(paperList))
 	for _, e := range paperList {
 		parent := e.DOM.Parent()
 		if parent.Length() == 0 {
-			l.Warn("Skipping article: no parent element found")
+			l.Warn("Skipping article: no parent element found", zap.String("mirror", host))
 			continue
 		}
 
 		paperInfoDiv := parent.Find("div.max-w-full")
 		if paperInfoDiv.Length() == 0 {
-			l.Warn("Skipping article: info container not found")
+			l.Warn("Skipping article: info container not found", zap.String("mirror", host))
 			continue
 		}
 
 		titleElement := paperInfoDiv.Find("a[href^='/md5/']")
 		title := strings.TrimSpace(titleElement.Text())
 		if title == "" {
-			l.Warn("Skipping article: title is empty")
+			l.Warn("Skipping article: title is empty", zap.String("mirror", host))
 			continue
 		}
 
@@ -270,28 +320,33 @@ func FindArticle(query string) ([]*Paper, error) {
 
 		link := e.Attr("href")
 		if link == "" {
-			l.Warn("Skipping article: no link found", zap.String("title", title))
+			l.Warn("Skipping article: no link found",
+				zap.String("mirror", host),
+				zap.String("title", title),
+			)
 			continue
 		}
 		hash := strings.TrimPrefix(link, "/md5/")
 		if hash == "" {
-			l.Warn("Skipping article: no hash found", zap.String("title", title))
+			l.Warn("Skipping article: no hash found",
+				zap.String("mirror", host),
+				zap.String("title", title),
+			)
 			continue
 		}
 
-		paper := &Paper{
+		paperListParsed = append(paperListParsed, &Paper{
 			Title:   title,
 			Authors: authors,
 			Journal: journal,
 			Size:    size,
 			Hash:    hash,
 			PageURL: e.Request.AbsoluteURL(link),
-		}
-
-		paperListParsed = append(paperListParsed, paper)
+		})
 	}
 
 	l.Info("Article search completed",
+		zap.String("mirror", host),
 		zap.Int("totalElements", len(paperList)),
 		zap.Int("validPapers", len(paperListParsed)),
 	)
@@ -301,106 +356,112 @@ func FindArticle(query string) ([]*Paper, error) {
 
 func (b *Book) Download(secretKey, folderPath string) error {
 	l := logger.GetLogger()
+	secretKey = strings.TrimSpace(secretKey)
+	if secretKey == "" {
+		return errors.New("secret key is required for book downloads")
+	}
+	if strings.TrimSpace(folderPath) == "" {
+		return errors.New("download path is required for book downloads")
+	}
+
 	baseEnv := env.GetBaseEnv()
-
 	client := &http.Client{Timeout: HTTPTimeout}
-	apiURL := fmt.Sprintf(AnnasDownloadEndpointFormat, baseEnv.AnnasBaseURL, b.Hash, secretKey)
+	errorsByMirror := make([]string, 0, len(baseEnv.AnnasBaseURLs))
 
-	l.Info("Fetching download URL", zap.String("hash", b.Hash))
-
-	resp, err := client.Get(apiURL)
-	if err != nil {
-		return fmt.Errorf("failed to fetch download URL: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if readErr != nil {
-			return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, resp.Status)
+	for _, host := range baseEnv.AnnasBaseURLs {
+		downloadURL, err := fetchFastDownloadURL(client, host, b.Hash, secretKey)
+		if err != nil {
+			errorsByMirror = append(errorsByMirror, fmt.Sprintf("%s: %v", host, err))
+			l.Warn("Fast download URL retrieval failed",
+				zap.String("mirror", host),
+				zap.String("hash", b.Hash),
+				zap.Error(err),
+			)
+			continue
 		}
-		return fmt.Errorf("API request failed with status %d: %s (body: %s)", resp.StatusCode, resp.Status, string(body))
-	}
 
-	var apiResp fastDownloadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-		return fmt.Errorf("failed to decode API response: %w", err)
-	}
-
-	if apiResp.DownloadURL == "" {
-		if apiResp.Error != "" {
-			return fmt.Errorf("API error: %s", apiResp.Error)
+		filePath, err := downloadFromURLToDisk(client, downloadURL, folderPath, preferredBookFilename(b))
+		if err != nil {
+			errorsByMirror = append(errorsByMirror, fmt.Sprintf("%s: %v", host, err))
+			l.Warn("Book download failed on mirror",
+				zap.String("mirror", host),
+				zap.String("hash", b.Hash),
+				zap.Error(err),
+			)
+			continue
 		}
-		return errors.New("API returned empty download URL")
+
+		l.Info("Book download completed successfully",
+			zap.String("mirror", host),
+			zap.String("hash", b.Hash),
+			zap.String("path", filePath),
+		)
+		return nil
 	}
 
-	l.Info("Downloading file", zap.String("url", apiResp.DownloadURL))
+	return fmt.Errorf("book download failed on all configured Anna's Archive mirrors: %s", strings.Join(errorsByMirror, " | "))
+}
 
-	downloadResp, err := client.Get(apiResp.DownloadURL)
-	if err != nil {
-		return fmt.Errorf("failed to download file: %w", err)
-	}
-	defer downloadResp.Body.Close()
-
-	if downloadResp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed with status %d: %s", downloadResp.StatusCode, downloadResp.Status)
+func (b *Book) DownloadInline(secretKey string, maxBytes int64) (*DownloadedFile, error) {
+	l := logger.GetLogger()
+	secretKey = strings.TrimSpace(secretKey)
+	if secretKey == "" {
+		return nil, errors.New("secret key is required for book downloads")
 	}
 
-	safeTitle := sanitizeFilename(b.Title)
-	if safeTitle == "" {
-		safeTitle = "untitled"
-	}
+	baseEnv := env.GetBaseEnv()
+	client := &http.Client{Timeout: HTTPTimeout}
+	errorsByMirror := make([]string, 0, len(baseEnv.AnnasBaseURLs))
 
-	format := strings.ToLower(b.Format)
-	if format == "" {
-		format = "bin"
-	}
+	for _, host := range baseEnv.AnnasBaseURLs {
+		downloadURL, err := fetchFastDownloadURL(client, host, b.Hash, secretKey)
+		if err != nil {
+			errorsByMirror = append(errorsByMirror, fmt.Sprintf("%s: %v", host, err))
+			l.Warn("Fast download URL retrieval failed",
+				zap.String("mirror", host),
+				zap.String("hash", b.Hash),
+				zap.Error(err),
+			)
+			continue
+		}
 
-	filename := safeTitle + "." + format
-	filePath := filepath.Join(folderPath, filename)
-
-	l.Info("Creating file", zap.String("path", filePath))
-
-	out, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-
-	success := false
-	defer func() {
-		out.Close()
-		if !success {
-			if removeErr := os.Remove(filePath); removeErr != nil {
-				l.Warn("Failed to remove partial file",
-					zap.String("path", filePath),
-					zap.Error(removeErr),
-				)
+		file, err := downloadFromURLToMemory(client, downloadURL, preferredBookFilename(b), host, maxBytes)
+		if err != nil {
+			if errors.Is(err, ErrInlineDownloadTooLarge) {
+				return nil, err
 			}
+
+			errorsByMirror = append(errorsByMirror, fmt.Sprintf("%s: %v", host, err))
+			l.Warn("Inline book download failed on mirror",
+				zap.String("mirror", host),
+				zap.String("hash", b.Hash),
+				zap.Error(err),
+			)
+			continue
 		}
-	}()
 
-	written, err := io.Copy(out, downloadResp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to write file (wrote %d bytes): %w", written, err)
+		l.Info("Inline book download completed successfully",
+			zap.String("mirror", host),
+			zap.String("hash", b.Hash),
+			zap.String("filename", file.Filename),
+			zap.Int64("bytes", file.Size),
+		)
+		return file, nil
 	}
 
-	if err := out.Sync(); err != nil {
-		return fmt.Errorf("failed to sync file to disk: %w", err)
-	}
-
-	success = true
-	l.Info("Download completed successfully",
-		zap.String("path", filePath),
-		zap.Int64("bytes", written),
-	)
-
-	return nil
+	return nil, fmt.Errorf("book download failed on all configured Anna's Archive mirrors: %s", strings.Join(errorsByMirror, " | "))
 }
 
 func LookupDOI(doi string) (*Paper, error) {
+	return withMirrorFallback("DOI lookup", func(host string) (*Paper, error) {
+		return lookupDOIOnHost(host, doi)
+	})
+}
+
+func lookupDOIOnHost(host, doi string) (*Paper, error) {
 	l := logger.GetLogger()
-	baseEnv := env.GetBaseEnv()
 	paper := &Paper{DOI: doi}
+	var searchErr error
 
 	searchCollector := colly.NewCollector(
 		colly.UserAgent(BrowserUserAgent),
@@ -422,24 +483,34 @@ func LookupDOI(doi string) (*Paper, error) {
 		if r != nil {
 			status = r.StatusCode
 		}
+		if searchErr == nil {
+			searchErr = fmt.Errorf("mirror %s SciDB lookup failed with status %d: %w", host, status, err)
+		}
 		l.Error("SciDB search failed",
+			zap.String("mirror", host),
 			zap.String("doi", doi),
 			zap.Int("statusCode", status),
 			zap.Error(err),
 		)
 	})
 
-	scidbURL := fmt.Sprintf(AnnasSciDBEndpointFormat, baseEnv.AnnasBaseURL, doi)
+	scidbURL := fmt.Sprintf(AnnasSciDBEndpointFormat, host, doi)
 	paper.PageURL = scidbURL
 
-	l.Info("Looking up DOI", zap.String("url", scidbURL))
+	l.Info("Looking up DOI",
+		zap.String("mirror", host),
+		zap.String("url", scidbURL),
+	)
 
 	if err := searchCollector.Visit(scidbURL); err != nil {
-		return nil, fmt.Errorf("failed to lookup DOI: %w", err)
+		return nil, fmt.Errorf("failed to lookup DOI on %s: %w", host, err)
+	}
+	if searchErr != nil {
+		return nil, searchErr
 	}
 
 	if paper.Hash == "" {
-		return nil, fmt.Errorf("no paper found for DOI: %s", doi)
+		return nil, fmt.Errorf("no paper found for DOI %s on mirror %s", doi, host)
 	}
 
 	detailCollector := colly.NewCollector(
@@ -482,121 +553,105 @@ func LookupDOI(doi string) (*Paper, error) {
 	})
 
 	detailCollector.OnError(func(r *colly.Response, err error) {
-		l.Warn("Failed to fetch paper details", zap.String("hash", paper.Hash), zap.Error(err))
+		l.Warn("Failed to fetch paper details",
+			zap.String("mirror", host),
+			zap.String("hash", paper.Hash),
+			zap.Error(err),
+		)
 	})
 
-	md5URL := fmt.Sprintf("https://%s/md5/%s", baseEnv.AnnasBaseURL, paper.Hash)
-	l.Info("Fetching paper details", zap.String("url", md5URL))
+	md5URL := fmt.Sprintf("https://%s/md5/%s", host, paper.Hash)
+	l.Info("Fetching paper details",
+		zap.String("mirror", host),
+		zap.String("url", md5URL),
+	)
 
 	if err := detailCollector.Visit(md5URL); err != nil {
-		l.Warn("Failed to visit paper detail page", zap.Error(err))
+		l.Warn("Failed to visit paper detail page",
+			zap.String("mirror", host),
+			zap.Error(err),
+		)
 	}
 
-	paper.DownloadURL = fmt.Sprintf("/scidb?doi=%s", doi)
+	paper.DownloadURL = fmt.Sprintf("/scidb?doi=%s", url.QueryEscape(doi))
 
 	return paper, nil
 }
 
 func (p *Paper) Download(folderPath string) error {
 	l := logger.GetLogger()
-	baseEnv := env.GetBaseEnv()
-
+	if strings.TrimSpace(folderPath) == "" {
+		return errors.New("download path is required for article downloads")
+	}
 	if p.DownloadURL == "" {
 		return errors.New("no download URL available for this paper")
 	}
 
-	downloadURL := p.DownloadURL
-	if !strings.HasPrefix(downloadURL, "http") {
-		downloadURL = fmt.Sprintf("https://%s%s", baseEnv.AnnasBaseURL, downloadURL)
-	}
-
+	baseEnv := env.GetBaseEnv()
 	client := &http.Client{Timeout: 2 * HTTPTimeout}
+	errorsByMirror := make([]string, 0, len(baseEnv.AnnasBaseURLs))
 
-	l.Info("Downloading paper via SciDB", zap.String("url", downloadURL))
-
-	req, err := http.NewRequest("GET", downloadURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("User-Agent", BrowserUserAgent)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to download paper: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if readErr != nil {
-			return fmt.Errorf("download failed with status %d: %s", resp.StatusCode, resp.Status)
+	for _, host := range baseEnv.AnnasBaseURLs {
+		downloadURL := relativeOrAbsoluteDownloadURL(host, p.DownloadURL)
+		filePath, err := downloadFromURLToDisk(client, downloadURL, folderPath, preferredPaperFilename(p))
+		if err != nil {
+			errorsByMirror = append(errorsByMirror, fmt.Sprintf("%s: %v", host, err))
+			l.Warn("Paper download failed on mirror",
+				zap.String("mirror", host),
+				zap.String("doi", p.DOI),
+				zap.Error(err),
+			)
+			continue
 		}
-		return fmt.Errorf("download failed with status %d: %s (body: %s)", resp.StatusCode, resp.Status, string(body))
+
+		l.Info("Paper download completed successfully",
+			zap.String("mirror", host),
+			zap.String("doi", p.DOI),
+			zap.String("path", filePath),
+		)
+		return nil
 	}
 
-	ext := ".pdf"
-	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
-		if _, params, err := mime.ParseMediaType(cd); err == nil {
-			if fn, ok := params["filename"]; ok {
-				if e := filepath.Ext(fn); e != "" {
-					ext = e
-				}
+	return fmt.Errorf("paper download failed on all configured Anna's Archive mirrors: %s", strings.Join(errorsByMirror, " | "))
+}
+
+func (p *Paper) DownloadInline(maxBytes int64) (*DownloadedFile, error) {
+	l := logger.GetLogger()
+	if p.DownloadURL == "" {
+		return nil, errors.New("no download URL available for this paper")
+	}
+
+	baseEnv := env.GetBaseEnv()
+	client := &http.Client{Timeout: 2 * HTTPTimeout}
+	errorsByMirror := make([]string, 0, len(baseEnv.AnnasBaseURLs))
+
+	for _, host := range baseEnv.AnnasBaseURLs {
+		downloadURL := relativeOrAbsoluteDownloadURL(host, p.DownloadURL)
+		file, err := downloadFromURLToMemory(client, downloadURL, preferredPaperFilename(p), host, maxBytes)
+		if err != nil {
+			if errors.Is(err, ErrInlineDownloadTooLarge) {
+				return nil, err
 			}
+
+			errorsByMirror = append(errorsByMirror, fmt.Sprintf("%s: %v", host, err))
+			l.Warn("Inline paper download failed on mirror",
+				zap.String("mirror", host),
+				zap.String("doi", p.DOI),
+				zap.Error(err),
+			)
+			continue
 		}
-	} else if ct := resp.Header.Get("Content-Type"); ct != "" {
-		exts, _ := mime.ExtensionsByType(ct)
-		if len(exts) > 0 {
-			ext = exts[0]
-		}
+
+		l.Info("Inline paper download completed successfully",
+			zap.String("mirror", host),
+			zap.String("doi", p.DOI),
+			zap.String("filename", file.Filename),
+			zap.Int64("bytes", file.Size),
+		)
+		return file, nil
 	}
 
-	name := p.Title
-	if name == "" {
-		name = p.DOI
-	}
-	safeName := sanitizeFilename(name)
-	if safeName == "" {
-		safeName = "paper"
-	}
-	filename := safeName + ext
-	filePath := filepath.Join(folderPath, filename)
-
-	l.Info("Creating file", zap.String("path", filePath))
-
-	out, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-
-	success := false
-	defer func() {
-		out.Close()
-		if !success {
-			if removeErr := os.Remove(filePath); removeErr != nil {
-				l.Warn("Failed to remove partial file",
-					zap.String("path", filePath),
-					zap.Error(removeErr),
-				)
-			}
-		}
-	}()
-
-	written, err := io.Copy(out, resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to write file (wrote %d bytes): %w", written, err)
-	}
-
-	if err := out.Sync(); err != nil {
-		return fmt.Errorf("failed to sync file to disk: %w", err)
-	}
-
-	success = true
-	l.Info("Paper download completed successfully",
-		zap.String("path", filePath),
-		zap.Int64("bytes", written),
-	)
-
-	return nil
+	return nil, fmt.Errorf("paper download failed on all configured Anna's Archive mirrors: %s", strings.Join(errorsByMirror, " | "))
 }
 
 func (b *Book) String() string {
@@ -611,4 +666,284 @@ func (b *Book) ToJSON() (string, error) {
 	}
 
 	return string(data), nil
+}
+
+func withMirrorFallback[T any](operation string, fn func(host string) (T, error)) (T, error) {
+	l := logger.GetLogger()
+	baseEnv := env.GetBaseEnv()
+
+	var zero T
+	if len(baseEnv.AnnasBaseURLs) == 0 {
+		return zero, fmt.Errorf("%s failed: no Anna's Archive mirrors configured", operation)
+	}
+
+	errorsByMirror := make([]string, 0, len(baseEnv.AnnasBaseURLs))
+	for _, host := range baseEnv.AnnasBaseURLs {
+		value, err := fn(host)
+		if err == nil {
+			return value, nil
+		}
+
+		errorsByMirror = append(errorsByMirror, fmt.Sprintf("%s: %v", host, err))
+		l.Warn("Anna's Archive mirror attempt failed",
+			zap.String("operation", operation),
+			zap.String("mirror", host),
+			zap.Error(err),
+		)
+	}
+
+	return zero, fmt.Errorf("%s failed on all configured Anna's Archive mirrors: %s", operation, strings.Join(errorsByMirror, " | "))
+}
+
+func fetchFastDownloadURL(client *http.Client, host, hash, secretKey string) (string, error) {
+	apiURL := fmt.Sprintf(AnnasDownloadEndpointFormat, host, hash, secretKey)
+
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create fast download request: %w", err)
+	}
+	req.Header.Set("User-Agent", BrowserUserAgent)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch download URL: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if readErr != nil {
+			return "", fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, resp.Status)
+		}
+		return "", fmt.Errorf("API request failed with status %d: %s (body: %s)", resp.StatusCode, resp.Status, string(body))
+	}
+
+	var apiResp fastDownloadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return "", fmt.Errorf("failed to decode API response: %w", err)
+	}
+
+	if apiResp.DownloadURL == "" {
+		if apiResp.Error != "" {
+			return "", fmt.Errorf("API error: %s", apiResp.Error)
+		}
+		return "", errors.New("API returned empty download URL")
+	}
+
+	return apiResp.DownloadURL, nil
+}
+
+func downloadFromURLToDisk(client *http.Client, downloadURL, folderPath, filenameHint string) (string, error) {
+	resp, err := issueDownloadRequest(client, downloadURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to download file: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", readDownloadError(resp)
+	}
+
+	if err := os.MkdirAll(folderPath, 0o755); err != nil {
+		return "", fmt.Errorf("failed to create download directory: %w", err)
+	}
+
+	filename := resolveDownloadFilename(resp, filenameHint)
+	filePath := filepath.Join(folderPath, filename)
+
+	out, err := os.Create(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create file: %w", err)
+	}
+
+	success := false
+	defer func() {
+		_ = out.Close()
+		if !success {
+			_ = os.Remove(filePath)
+		}
+	}()
+
+	written, err := io.Copy(out, resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to write file (wrote %d bytes): %w", written, err)
+	}
+
+	if err := out.Sync(); err != nil {
+		return "", fmt.Errorf("failed to sync file to disk: %w", err)
+	}
+
+	success = true
+	return filePath, nil
+}
+
+func downloadFromURLToMemory(client *http.Client, downloadURL, filenameHint, sourceMirror string, maxBytes int64) (*DownloadedFile, error) {
+	resp, err := issueDownloadRequest(client, downloadURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, readDownloadError(resp)
+	}
+
+	if maxBytes > 0 && resp.ContentLength > maxBytes {
+		return nil, fmt.Errorf("%w: %d bytes exceeds configured limit of %d bytes", ErrInlineDownloadTooLarge, resp.ContentLength, maxBytes)
+	}
+
+	data, err := readBodyWithLimit(resp.Body, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	filename := resolveDownloadFilename(resp, filenameHint)
+	mimeType := resolveMIMEType(resp, filename, data)
+
+	return &DownloadedFile{
+		Filename:     filename,
+		MIMEType:     mimeType,
+		Size:         int64(len(data)),
+		Data:         data,
+		SourceURL:    downloadURL,
+		SourceMirror: sourceMirror,
+	}, nil
+}
+
+func issueDownloadRequest(client *http.Client, downloadURL string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("User-Agent", BrowserUserAgent)
+	return client.Do(req)
+}
+
+func readDownloadError(resp *http.Response) error {
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
+	if readErr != nil {
+		return fmt.Errorf("download failed with status %d: %s", resp.StatusCode, resp.Status)
+	}
+	return fmt.Errorf("download failed with status %d: %s (body: %s)", resp.StatusCode, resp.Status, string(body))
+}
+
+func readBodyWithLimit(r io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return io.ReadAll(r)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%w: response body exceeds configured limit of %d bytes", ErrInlineDownloadTooLarge, maxBytes)
+	}
+
+	return data, nil
+}
+
+func resolveDownloadFilename(resp *http.Response, filenameHint string) string {
+	ext := inferResponseExtension(resp, filepath.Ext(filenameHint))
+	base := strings.TrimSuffix(filepath.Base(filenameHint), filepath.Ext(filenameHint))
+	base = sanitizeFilename(base)
+	if base == "" {
+		base = "download"
+	}
+	return base + ext
+}
+
+func inferResponseExtension(resp *http.Response, fallbackExt string) string {
+	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
+		if _, params, err := mime.ParseMediaType(cd); err == nil {
+			if filename := params["filename"]; filename != "" {
+				if ext := filepath.Ext(filename); ext != "" {
+					return normalizeExtension(ext, fallbackExt)
+				}
+			}
+		}
+	}
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		if mediaType, _, err := mime.ParseMediaType(ct); err == nil {
+			exts, _ := mime.ExtensionsByType(mediaType)
+			if len(exts) > 0 {
+				return normalizeExtension(exts[0], fallbackExt)
+			}
+		}
+	}
+
+	return normalizeExtension(fallbackExt, DefaultBinaryExtension)
+}
+
+func normalizeExtension(ext, fallback string) string {
+	ext = strings.TrimSpace(ext)
+	if ext == "" {
+		ext = strings.TrimSpace(fallback)
+	}
+	if ext == "" {
+		ext = DefaultBinaryExtension
+	}
+	if !strings.HasPrefix(ext, ".") {
+		ext = "." + ext
+	}
+	return strings.ToLower(ext)
+}
+
+func resolveMIMEType(resp *http.Response, filename string, data []byte) string {
+	if ct := strings.TrimSpace(resp.Header.Get("Content-Type")); ct != "" {
+		if mediaType, _, err := mime.ParseMediaType(ct); err == nil && mediaType != "" {
+			return mediaType
+		}
+		return strings.TrimSpace(strings.Split(ct, ";")[0])
+	}
+
+	if ext := strings.ToLower(filepath.Ext(filename)); ext != "" {
+		if mimeType := mime.TypeByExtension(ext); mimeType != "" {
+			return strings.TrimSpace(strings.Split(mimeType, ";")[0])
+		}
+	}
+
+	if len(data) > 0 {
+		return http.DetectContentType(data)
+	}
+
+	return DefaultBinaryMIMEType
+}
+
+func preferredBookFilename(b *Book) string {
+	name := strings.TrimSpace(b.Title)
+	if name == "" {
+		name = strings.TrimSpace(b.Hash)
+	}
+	if name == "" {
+		name = "book"
+	}
+
+	ext := strings.TrimSpace(strings.ToLower(b.Format))
+	if ext == "" {
+		ext = strings.TrimPrefix(DefaultBinaryExtension, ".")
+	}
+
+	return sanitizeFilename(name) + "." + ext
+}
+
+func preferredPaperFilename(p *Paper) string {
+	name := strings.TrimSpace(p.Title)
+	if name == "" {
+		name = strings.TrimSpace(p.DOI)
+	}
+	if name == "" {
+		name = "paper"
+	}
+
+	return sanitizeFilename(name) + ".pdf"
+}
+
+func relativeOrAbsoluteDownloadURL(host, raw string) string {
+	if strings.HasPrefix(strings.TrimSpace(raw), "http://") || strings.HasPrefix(strings.TrimSpace(raw), "https://") {
+		return raw
+	}
+	return fmt.Sprintf("https://%s%s", host, raw)
 }

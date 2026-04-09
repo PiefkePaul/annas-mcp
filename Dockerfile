@@ -15,11 +15,6 @@ RUN apk add --no-cache ca-certificates tzdata wget
 
 WORKDIR /app
 COPY --from=builder /out/annas-mcp /usr/local/bin/annas-mcp
-RUN mkdir -p /data/downloads
-
-ENV ANNAS_DOWNLOAD_PATH=/data/downloads
-ENV ANNAS_HTTP_ADDR=:8080
-ENV ANNAS_HTTP_PATH=/mcp
 
 EXPOSE 8080
 

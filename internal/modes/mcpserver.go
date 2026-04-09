@@ -2,7 +2,9 @@ package modes
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/PiefkePaul/annas-mcp/internal/anna"
@@ -13,7 +15,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const serverInstructions = "Use the Anna's Archive search tools first to find books or academic papers. Use download tools only when the user explicitly asks to save a file, because downloads write files into the server's configured download directory rather than returning file contents in chat. For article lookups, article_search also accepts a DOI directly when it starts with 10."
+const serverInstructions = "Use the Anna's Archive search tools first to find books or academic papers. Download tools can return files as embedded MCP resources when the payload fits within the configured inline size limit. For book downloads, ask for the user's Anna's Archive fast-download secret key when it has not already been provided. Article downloads can fall back to SciDB when no secret key is available. The server automatically retries official Anna's Archive mirrors when one is unavailable."
 
 func BookSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[BookSearchParams]) (*mcp.CallToolResultFor[any], error) {
 	l := logger.GetLogger()
@@ -52,10 +54,9 @@ func BookDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.Ca
 		zap.String("format", params.Arguments.Format),
 	)
 
-	downloadEnv, err := env.GetEnv()
-	if err != nil {
-		l.Error("Failed to get environment variables", zap.Error(err))
-		return nil, err
+	secretKey := resolveSecretKey(params.Arguments.SecretKey)
+	if secretKey == "" {
+		return nil, errors.New("book_download requires a secret_key argument or a server-side ANNAS_SECRET_KEY default")
 	}
 
 	book := &anna.Book{
@@ -64,10 +65,14 @@ func BookDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.Ca
 		Format: params.Arguments.Format,
 	}
 
-	if err := book.Download(downloadEnv.SecretKey, downloadEnv.DownloadPath); err != nil {
+	file, err := book.DownloadInline(secretKey, env.GetMaxInlineDownloadBytes())
+	if err != nil {
+		if errors.Is(err, anna.ErrInlineDownloadTooLarge) {
+			return textResult(inlineLimitMessage("book")), nil
+		}
+
 		l.Error("Download command failed",
 			zap.String("bookHash", params.Arguments.BookHash),
-			zap.String("downloadPath", downloadEnv.DownloadPath),
 			zap.Error(err),
 		)
 		return nil, err
@@ -75,10 +80,11 @@ func BookDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.Ca
 
 	l.Info("Download command completed successfully",
 		zap.String("bookHash", params.Arguments.BookHash),
-		zap.String("downloadPath", downloadEnv.DownloadPath),
+		zap.String("filename", file.Filename),
+		zap.Int64("bytes", file.Size),
 	)
 
-	return textResult("Book downloaded successfully to path: " + downloadEnv.DownloadPath), nil
+	return inlineFileResult(file, "Book downloaded successfully and returned as an embedded file."), nil
 }
 
 func ArticleSearchTool(ctx context.Context, cc *mcp.ServerSession, params *mcp.CallToolParamsFor[ArticleSearchParams]) (*mcp.CallToolResultFor[any], error) {
@@ -131,12 +137,6 @@ func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp
 
 	l.Info("Download paper command called", zap.String("doi", doi))
 
-	downloadEnv, err := env.GetDownloadEnv(false)
-	if err != nil {
-		l.Error("Failed to get download environment variables", zap.Error(err))
-		return nil, err
-	}
-
 	paper, err := anna.LookupDOI(doi)
 	if err != nil {
 		l.Error("DOI lookup failed for download",
@@ -146,13 +146,20 @@ func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp
 		return nil, err
 	}
 
-	if paper.Hash != "" && downloadEnv.SecretKey != "" {
+	secretKey := resolveSecretKey(params.Arguments.SecretKey)
+	if paper.Hash != "" && secretKey != "" {
 		book := &anna.Book{
 			Hash:   paper.Hash,
 			Title:  paper.Title,
 			Format: "pdf",
 		}
-		if err := book.Download(downloadEnv.SecretKey, downloadEnv.DownloadPath); err != nil {
+
+		file, err := book.DownloadInline(secretKey, env.GetMaxInlineDownloadBytes())
+		if err != nil {
+			if errors.Is(err, anna.ErrInlineDownloadTooLarge) {
+				return textResult(inlineLimitMessage("article")), nil
+			}
+
 			l.Warn("Fast download failed, trying SciDB download",
 				zap.String("doi", doi),
 				zap.Error(err),
@@ -160,13 +167,19 @@ func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp
 		} else {
 			l.Info("Paper downloaded via fast download",
 				zap.String("doi", doi),
-				zap.String("path", downloadEnv.DownloadPath),
+				zap.String("filename", file.Filename),
+				zap.Int64("bytes", file.Size),
 			)
-			return textResult("Paper downloaded successfully to path: " + downloadEnv.DownloadPath), nil
+			return inlineFileResult(file, "Article downloaded successfully via fast download and returned as an embedded file."), nil
 		}
 	}
 
-	if err := paper.Download(downloadEnv.DownloadPath); err != nil {
+	file, err := paper.DownloadInline(env.GetMaxInlineDownloadBytes())
+	if err != nil {
+		if errors.Is(err, anna.ErrInlineDownloadTooLarge) {
+			return textResult(inlineLimitMessage("article")), nil
+		}
+
 		l.Error("SciDB download failed",
 			zap.String("doi", doi),
 			zap.Error(err),
@@ -176,10 +189,11 @@ func ArticleDownloadTool(ctx context.Context, cc *mcp.ServerSession, params *mcp
 
 	l.Info("Paper downloaded via SciDB",
 		zap.String("doi", doi),
-		zap.String("path", downloadEnv.DownloadPath),
+		zap.String("filename", file.Filename),
+		zap.Int64("bytes", file.Size),
 	)
 
-	return textResult("Paper downloaded successfully to path: " + downloadEnv.DownloadPath), nil
+	return inlineFileResult(file, "Article downloaded successfully via SciDB and returned as an embedded file."), nil
 }
 
 func newMCPServer(serverVersion string) *mcp.Server {
@@ -207,33 +221,31 @@ func newMCPServer(serverVersion string) *mcp.Server {
 	decorateReadOnlyTool(articleSearchTool, "Search academic papers in Anna's Archive")
 	server.AddTools(articleSearchTool)
 
-	if env.CanBookDownload() {
-		bookDownloadTool := mcp.NewServerTool(
-			"book_download",
-			"Download a book file by MD5 hash into the server's configured download directory. Use this only after the user explicitly asks to save a file.",
-			BookDownloadTool,
-			mcp.Input(
-				mcp.Property("hash", mcp.Description("The MD5 hash returned by book_search.")),
-				mcp.Property("title", mcp.Description("Book title used to create the local filename.")),
-				mcp.Property("format", mcp.Description("Book file format, for example pdf or epub.")),
-			),
-		)
-		decorateWriteTool(bookDownloadTool, "Download a book file from Anna's Archive")
-		server.AddTools(bookDownloadTool)
-	}
+	bookDownloadTool := mcp.NewServerTool(
+		"book_download",
+		"Download a book file by MD5 hash. The file is returned as an embedded MCP resource when it fits within the configured inline size limit. Requires an Anna's Archive fast-download secret key, either passed as secret_key or configured server-side.",
+		BookDownloadTool,
+		mcp.Input(
+			mcp.Property("hash", mcp.Description("The MD5 hash returned by book_search.")),
+			mcp.Property("title", mcp.Description("Book title used to create the returned filename.")),
+			mcp.Property("format", mcp.Description("Book file format, for example pdf or epub.")),
+			mcp.Property("secret_key", mcp.Description("Anna's Archive fast-download secret key. Optional only when the server has ANNAS_SECRET_KEY configured.")),
+		),
+	)
+	decorateWriteTool(bookDownloadTool, "Download a book file from Anna's Archive")
+	server.AddTools(bookDownloadTool)
 
-	if env.CanArticleDownload() {
-		articleDownloadTool := mcp.NewServerTool(
-			"article_download",
-			"Download an academic paper by DOI into the server's configured download directory. Use this only after the user explicitly asks to save a file.",
-			ArticleDownloadTool,
-			mcp.Input(
-				mcp.Property("doi", mcp.Description("The DOI of the paper to download, for example 10.1038/nature12345.")),
-			),
-		)
-		decorateWriteTool(articleDownloadTool, "Download an academic paper by DOI")
-		server.AddTools(articleDownloadTool)
-	}
+	articleDownloadTool := mcp.NewServerTool(
+		"article_download",
+		"Download an academic paper by DOI. The file is returned as an embedded MCP resource when it fits within the configured inline size limit. Optional secret_key enables Anna's fast-download path before falling back to SciDB.",
+		ArticleDownloadTool,
+		mcp.Input(
+			mcp.Property("doi", mcp.Description("The DOI of the paper to download, for example 10.1038/nature12345.")),
+			mcp.Property("secret_key", mcp.Description("Optional Anna's Archive fast-download secret key. Used first when available, otherwise the tool falls back to SciDB.")),
+		),
+	)
+	decorateWriteTool(articleDownloadTool, "Download an academic paper by DOI")
+	server.AddTools(articleDownloadTool)
 
 	return server
 }
@@ -262,6 +274,44 @@ func textResult(text string) *mcp.CallToolResultFor[any] {
 	return &mcp.CallToolResultFor[any]{
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
 	}
+}
+
+func inlineFileResult(file *anna.DownloadedFile, message string) *mcp.CallToolResultFor[any] {
+	resourceURI := "annas://download/" + url.PathEscape(file.Filename)
+
+	return &mcp.CallToolResultFor[any]{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: fmt.Sprintf("%s\nFilename: %s\nMIME type: %s\nSize: %d bytes\nMirror: %s",
+					message,
+					file.Filename,
+					file.MIMEType,
+					file.Size,
+					file.SourceMirror,
+				),
+			},
+			&mcp.EmbeddedResource{
+				Resource: &mcp.ResourceContents{
+					URI:      resourceURI,
+					MIMEType: file.MIMEType,
+					Blob:     file.Data,
+				},
+			},
+		},
+	}
+}
+
+func resolveSecretKey(provided string) string {
+	provided = strings.TrimSpace(provided)
+	if provided != "" {
+		return provided
+	}
+	return env.GetDefaultSecretKey()
+}
+
+func inlineLimitMessage(kind string) string {
+	limitMB := env.GetMaxInlineDownloadBytes() / (1024 * 1024)
+	return fmt.Sprintf("The %s download is larger than the current inline return limit of %d MB, so it could not be attached to the MCP response.", kind, limitMB)
 }
 
 func formatBookResults(books []*anna.Book) string {

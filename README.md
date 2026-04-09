@@ -12,7 +12,9 @@ It keeps the original CLI and stdio MCP mode, adds a native Streamable HTTP MCP 
 - Native MCP over Streamable HTTP via `annas-mcp http`
 - ChatGPT-friendlier MCP metadata for the exposed tools
 - Search-only operation without forcing `ANNAS_SECRET_KEY`
-- Conditional download tools that only appear when the required download environment is configured
+- Per-call download secrets for remote MCP clients instead of requiring a single server-global download key
+- Automatic fallback across the current official Anna's Archive mirrors
+- Embedded MCP file responses for downloads that fit within the configured inline size limit
 - `/healthz` endpoint for Docker and reverse-proxy health checks
 - Multi-stage `Dockerfile` for container builds
 - `compose.yaml` and `.env.example` for local or hosted deployment
@@ -32,9 +34,11 @@ It keeps the original CLI and stdio MCP mode, adds a native Streamable HTTP MCP 
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `ANNAS_SECRET_KEY` | Only for fast book downloads | Anna's Archive fast-download key. This is kept as a backend credential and is not used as ChatGPT authentication. |
-| `ANNAS_DOWNLOAD_PATH` | Only for download tools | Absolute path where downloaded files are stored. |
-| `ANNAS_BASE_URL` | No | Anna's Archive mirror hostname. Defaults to `annas-archive.li`. |
+| `ANNAS_SECRET_KEY` | No | Optional default Anna's Archive fast-download key used only when the client does not pass `secret_key` to the download tool. This is not ChatGPT authentication. |
+| `ANNAS_DOWNLOAD_PATH` | Only for local CLI or optional server-side saves | Absolute path where files are written when you use the CLI download commands. Remote MCP downloads do not require it. |
+| `ANNAS_BASE_URL` | No | Optional legacy single-mirror override. |
+| `ANNAS_BASE_URLS` | No | Optional comma-separated mirror list. Defaults to the currently listed official mirrors: `annas-archive.gl`, `annas-archive.pk`, `annas-archive.gd`. |
+| `ANNAS_MAX_INLINE_DOWNLOAD_MB` | No | Maximum file size returned inline through MCP as an embedded resource. Defaults to `20`. |
 
 ### HTTP Variables
 
@@ -61,13 +65,16 @@ A few important details:
 - `ANNAS_SECRET_KEY` is **not** used as ChatGPT connector auth. It stays an Anna's Archive backend secret for fast downloads.
 - The built-in `bearer` mode is useful for your own MCP clients, but not the right fit for direct ChatGPT MCP connectors.
 - If you need authenticated ChatGPT access later, put an OAuth-capable gateway or proxy in front of this server instead of reusing `ANNAS_SECRET_KEY` as a client token.
-- Search tools are always exposed. Download tools are only exposed when the required download environment is configured.
+- Search and download tools are always exposed.
+- `book_download` accepts `secret_key` per tool call, so multiple users can use their own Anna's Archive keys against the same remote MCP server.
+- `article_download` works without a secret by falling back to SciDB, and uses `secret_key` first when one is provided.
+- Downloads are returned as embedded MCP resources when they fit within `ANNAS_MAX_INLINE_DOWNLOAD_MB`. Whether a specific client renders that as a visible attachment depends on the client.
 
 ## Docker Quick Start
 
 1. Create a local `.env` file from `.env.example`.
 2. Set `ANNAS_HTTP_AUTH_MODE=none` if you want to connect the server directly from ChatGPT.
-3. Set your real `ANNAS_SECRET_KEY` only if you want fast book downloads.
+3. Optionally set `ANNAS_SECRET_KEY` only if you want a server-side default fast-download key. Remote clients can also pass `secret_key` per download call.
 4. Start the container:
 
 ```bash
@@ -92,7 +99,7 @@ curl http://localhost:8080/
 http://localhost:8080/mcp
 ```
 
-Downloaded files are written to the local `downloads/` directory on the host through the bind mount defined in `compose.yaml`.
+Downloads are returned inline as embedded MCP resources when they fit within the configured size limit. A host bind mount is no longer required for the normal remote MCP flow.
 
 ## Automatic Docker Hub Publishing
 
@@ -133,12 +140,15 @@ annas-mcp mcp
 ### Remote HTTP MCP server
 
 ```bash
-ANNAS_DOWNLOAD_PATH=/absolute/path \
 ANNAS_HTTP_AUTH_MODE=none \
 annas-mcp http
 ```
 
-Add `ANNAS_SECRET_KEY=your-key` if you also want fast book downloads.
+Optional additions:
+
+- `ANNAS_SECRET_KEY=your-key` if you want a server-default fast-download key
+- `ANNAS_BASE_URLS=annas-archive.gl,annas-archive.pk,annas-archive.gd` to override the mirror list explicitly
+- `ANNAS_MAX_INLINE_DOWNLOAD_MB=20` to tune the maximum embedded file size
 
 ## Making It Reachable From the Internet
 

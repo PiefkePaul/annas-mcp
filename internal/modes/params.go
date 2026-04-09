@@ -5,9 +5,10 @@ type BookSearchParams struct {
 }
 
 type BookDownloadParams struct {
-	BookHash string `json:"hash" mcp:"MD5 hash of the book to download"`
-	Title    string `json:"title" mcp:"Book title, used for filename"`
-	Format   string `json:"format" mcp:"Book format, for example pdf or epub"`
+	BookHash  string `json:"hash" mcp:"MD5 hash of the book to download"`
+	Title     string `json:"title" mcp:"Book title, used for filename"`
+	Format    string `json:"format" mcp:"Book format, for example pdf or epub"`
+	SecretKey string `json:"secret_key,omitempty" mcp:"Optional Anna's Archive fast-download secret key. Required if the server has no default ANNAS_SECRET_KEY configured."`
 }
 
 type ArticleSearchParams struct {
@@ -15,5 +16,6 @@ type ArticleSearchParams struct {
 }
 
 type ArticleDownloadParams struct {
-	DOI string `json:"doi" mcp:"DOI of the article to download (e.g., '10.1038/nature12345')"`
+	DOI       string `json:"doi" mcp:"DOI of the article to download (e.g., '10.1038/nature12345')"`
+	SecretKey string `json:"secret_key,omitempty" mcp:"Optional Anna's Archive fast-download secret key. Used before falling back to SciDB."`
 }

@@ -34,3 +34,12 @@ type fastDownloadResponse struct {
 	DownloadURL string `json:"download_url"`
 	Error       string `json:"error"`
 }
+
+type DownloadedFile struct {
+	Filename     string `json:"filename"`
+	MIMEType     string `json:"mime_type"`
+	Size         int64  `json:"size"`
+	Data         []byte `json:"-"`
+	SourceURL    string `json:"source_url,omitempty"`
+	SourceMirror string `json:"source_mirror,omitempty"`
+}

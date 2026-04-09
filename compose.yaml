@@ -7,12 +7,14 @@
     env_file:
       - .env
     environment:
-      ANNAS_DOWNLOAD_PATH: ${ANNAS_DOWNLOAD_PATH:-/data/downloads}
+      ANNAS_SECRET_KEY: ${ANNAS_SECRET_KEY:-}
+      ANNAS_BASE_URL: ${ANNAS_BASE_URL:-}
+      ANNAS_BASE_URLS: ${ANNAS_BASE_URLS:-}
+      ANNAS_MAX_INLINE_DOWNLOAD_MB: ${ANNAS_MAX_INLINE_DOWNLOAD_MB:-20}
       ANNAS_HTTP_ADDR: ${ANNAS_HTTP_ADDR:-:8080}
       ANNAS_HTTP_PATH: ${ANNAS_HTTP_PATH:-/mcp}
       ANNAS_HTTP_AUTH_MODE: ${ANNAS_HTTP_AUTH_MODE:-none}
       ANNAS_PUBLIC_BASE_URL: ${ANNAS_PUBLIC_BASE_URL:-}
+      ANNAS_HTTP_BEARER_TOKEN: ${ANNAS_HTTP_BEARER_TOKEN:-}
     ports:
       - "${ANNAS_HTTP_PORT:-8080}:8080"
-    volumes:
-      - ./downloads:/data/downloads

@@ -1,4 +1,4 @@
-﻿package modes
+package modes
 
 import (
 	"context"
@@ -31,6 +31,7 @@ func StartHTTPServer() {
 	serverVersion := version.GetVersion()
 	server := newMCPServer(serverVersion)
 	availableTools := exposedToolNames()
+	baseEnv := env.GetBaseEnv()
 
 	if !httpEnv.ChatGPTCompatibleAuth() {
 		l.Warn("Bearer auth is enabled. ChatGPT MCP connectors currently expect no auth or OAuth rather than a custom bearer token.",
@@ -70,16 +71,21 @@ func StartHTTPServer() {
 			}
 
 			payload := map[string]any{
-				"name":                    "annas-mcp",
-				"version":                 serverVersion,
-				"transport":               "streamable-http",
-				"mcp_endpoint":            httpEnv.Path,
-				"health_endpoint":         "/healthz",
-				"auth_mode":               httpEnv.AuthMode,
-				"chatgpt_auth_compatible": httpEnv.ChatGPTCompatibleAuth(),
-				"book_download_enabled":   env.CanBookDownload(),
-				"article_download_enabled": env.CanArticleDownload(),
-				"available_tools":         availableTools,
+				"name":                             "annas-mcp",
+				"version":                          serverVersion,
+				"transport":                        "streamable-http",
+				"mcp_endpoint":                     httpEnv.Path,
+				"health_endpoint":                  "/healthz",
+				"auth_mode":                        httpEnv.AuthMode,
+				"chatgpt_auth_compatible":          httpEnv.ChatGPTCompatibleAuth(),
+				"book_download_enabled":            true,
+				"article_download_enabled":         true,
+				"available_tools":                  availableTools,
+				"annas_mirrors":                    baseEnv.AnnasBaseURLs,
+				"primary_annas_mirror":             baseEnv.AnnasBaseURL,
+				"default_secret_configured":        env.HasDefaultSecretKey(),
+				"default_download_path_configured": env.HasDefaultDownloadPath(),
+				"inline_download_max_bytes":        env.GetMaxInlineDownloadBytes(),
 			}
 
 			if connectorURL := httpEnv.ConnectorURL(); connectorURL != "" {
@@ -111,8 +117,11 @@ func StartHTTPServer() {
 		zap.String("path", httpEnv.Path),
 		zap.String("authMode", string(httpEnv.AuthMode)),
 		zap.Bool("chatgptAuthCompatible", httpEnv.ChatGPTCompatibleAuth()),
-		zap.Bool("bookDownloadEnabled", env.CanBookDownload()),
-		zap.Bool("articleDownloadEnabled", env.CanArticleDownload()),
+		zap.Bool("bookDownloadEnabled", true),
+		zap.Bool("articleDownloadEnabled", true),
+		zap.Bool("defaultSecretConfigured", env.HasDefaultSecretKey()),
+		zap.Bool("defaultDownloadPathConfigured", env.HasDefaultDownloadPath()),
+		zap.Strings("annasMirrors", baseEnv.AnnasBaseURLs),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -171,14 +180,7 @@ func withBearerAuth(token string, next http.Handler) http.Handler {
 }
 
 func exposedToolNames() []string {
-	tools := []string{"book_search", "article_search"}
-	if env.CanBookDownload() {
-		tools = append(tools, "book_download")
-	}
-	if env.CanArticleDownload() {
-		tools = append(tools, "article_download")
-	}
-	return tools
+	return []string{"book_search", "article_search", "book_download", "article_download"}
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
