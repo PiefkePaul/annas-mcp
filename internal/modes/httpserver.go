@@ -44,9 +44,14 @@ func StartHTTPServer() {
 			AuthorizationCodeTTL: authEnv.AuthorizationCodeTTL,
 			SessionTTL:           authEnv.SessionTTL,
 			MCPPath:              httpEnv.Path,
+			PublicBaseURL:        httpEnv.PublicBaseURL,
 		})
 		if err != nil {
 			l.Fatal("Failed to initialize OAuth/auth manager", zap.Error(err))
+		}
+
+		if strings.TrimSpace(httpEnv.PublicBaseURL) == "" {
+			l.Warn("OAuth mode is running without ANNAS_PUBLIC_BASE_URL. This can cause issuer or redirect mismatches behind reverse proxies or multiple domains.")
 		}
 	}
 

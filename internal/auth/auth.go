@@ -48,6 +48,7 @@ type Config struct {
 	AuthorizationCodeTTL time.Duration
 	SessionTTL           time.Duration
 	MCPPath              string
+	PublicBaseURL        string
 }
 
 type Manager struct {
@@ -305,7 +306,7 @@ func (m *Manager) cleanupLocked(now time.Time) {
 }
 
 func (m *Manager) ChallengeHeader(r *http.Request) string {
-	prmURL := BaseURLFromRequest(r) + "/.well-known/oauth-protected-resource"
+	prmURL := m.baseURL(r) + "/.well-known/oauth-protected-resource"
 	return fmt.Sprintf(`Bearer realm="annas-mcp", resource_metadata="%s"`, prmURL)
 }
 
@@ -316,7 +317,7 @@ func (m *Manager) HandleProtectedResourceMetadata(w http.ResponseWriter, r *http
 		return
 	}
 
-	baseURL := BaseURLFromRequest(r)
+	baseURL := m.baseURL(r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"resource":              baseURL + m.cfg.MCPPath,
 		"authorization_servers": []string{baseURL},
@@ -331,17 +332,18 @@ func (m *Manager) HandleAuthorizationServerMetadata(w http.ResponseWriter, r *ht
 		return
 	}
 
-	baseURL := BaseURLFromRequest(r)
+	baseURL := m.baseURL(r)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"issuer":                                baseURL,
-		"authorization_endpoint":                baseURL + "/authorize",
-		"token_endpoint":                        baseURL + "/token",
-		"registration_endpoint":                 baseURL + "/register",
-		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
-		"token_endpoint_auth_methods_supported": []string{"none"},
-		"code_challenge_methods_supported":      []string{"S256"},
-		"scopes_supported":                      []string{"mcp"},
+		"issuer":                 baseURL,
+		"authorization_endpoint": baseURL + "/authorize",
+		"token_endpoint":         baseURL + "/token",
+		"registration_endpoint":  baseURL + "/register",
+		"registration_endpoint_auth_methods_supported": []string{"none"},
+		"response_types_supported":                     []string{"code"},
+		"grant_types_supported":                        []string{"authorization_code", "refresh_token"},
+		"token_endpoint_auth_methods_supported":        []string{"none"},
+		"code_challenge_methods_supported":             []string{"S256"},
+		"scopes_supported":                             []string{"mcp"},
 	})
 }
 
@@ -445,7 +447,7 @@ func (m *Manager) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) handleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
-	params, client, err := m.parseAuthorizeRequest(r.URL.Query())
+	params, client, err := m.parseAuthorizeRequest(r.URL.Query(), m.resourceURL(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -496,7 +498,7 @@ func (m *Manager) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 		values.Set(key, r.FormValue(key))
 	}
 
-	params, client, err := m.parseAuthorizeRequest(values)
+	params, client, err := m.parseAuthorizeRequest(values, m.resourceURL(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -544,7 +546,7 @@ func (m *Manager) handleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	completeBrowserRedirect(w, r, target, "Authorization complete")
 }
 
-func (m *Manager) parseAuthorizeRequest(values url.Values) (*authorizeParams, *clientRecord, error) {
+func (m *Manager) parseAuthorizeRequest(values url.Values, defaultResource string) (*authorizeParams, *clientRecord, error) {
 	params := &authorizeParams{
 		ClientID:            strings.TrimSpace(values.Get("client_id")),
 		RedirectURI:         strings.TrimSpace(values.Get("redirect_uri")),
@@ -563,7 +565,7 @@ func (m *Manager) parseAuthorizeRequest(values url.Values) (*authorizeParams, *c
 		return nil, nil, fmt.Errorf("response_type must be code")
 	}
 	if params.Resource == "" {
-		return nil, nil, fmt.Errorf("resource is required")
+		params.Resource = strings.TrimSpace(defaultResource)
 	}
 	if params.CodeChallenge == "" || params.CodeChallengeMethod != "S256" {
 		return nil, nil, fmt.Errorf("PKCE with code_challenge_method=S256 is required")
@@ -1159,6 +1161,17 @@ func IdentityFromContext(ctx context.Context) *Identity {
 
 func ResourceURLForRequest(r *http.Request, mcpPath string) string {
 	return BaseURLFromRequest(r) + mcpPath
+}
+
+func (m *Manager) resourceURL(r *http.Request) string {
+	return m.baseURL(r) + m.cfg.MCPPath
+}
+
+func (m *Manager) baseURL(r *http.Request) string {
+	if strings.TrimSpace(m.cfg.PublicBaseURL) != "" {
+		return strings.TrimRight(strings.TrimSpace(m.cfg.PublicBaseURL), "/")
+	}
+	return BaseURLFromRequest(r)
 }
 
 func BaseURLFromRequest(r *http.Request) string {

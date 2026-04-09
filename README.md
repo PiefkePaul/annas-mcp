@@ -51,7 +51,7 @@ It keeps the original CLI and stdio MCP mode, adds a native Streamable HTTP MCP 
 | `ANNAS_HTTP_PATH` | No | MCP endpoint path. Defaults to `/mcp`. |
 | `ANNAS_HTTP_AUTH_MODE` | No | `none`, `oauth`, or `bearer`. Use `oauth` for per-user sign-in with stored secrets. Defaults to `none`. |
 | `ANNAS_HTTP_BEARER_TOKEN` | Only if `ANNAS_HTTP_AUTH_MODE=bearer` | Bearer token for non-ChatGPT clients. |
-| `ANNAS_PUBLIC_BASE_URL` | Recommended for public deployments | Public base URL used to advertise the final connector URL in the root endpoint. |
+| `ANNAS_PUBLIC_BASE_URL` | Recommended for public deployments, effectively required for stable OAuth behind reverse proxies | Public canonical base URL used for connector metadata, OAuth discovery, redirects, and temporary download links. |
 | `ANNAS_HTTP_PORT` | Compose only | Host port published by `compose.yaml`. Defaults to `8080`. |
 
 ### OAuth / Account Variables
@@ -80,6 +80,7 @@ A few important details:
 
 - `ANNAS_SECRET_KEY` is **not** used as ChatGPT connector auth. It stays an Anna's Archive backend secret for fast downloads.
 - `oauth` mode exposes a built-in account portal at `/account`, an OAuth authorization server, and encrypted storage for per-user Anna's Archive secrets.
+- When `ANNAS_HTTP_AUTH_MODE=oauth`, set `ANNAS_PUBLIC_BASE_URL` to the exact public origin you will use in ChatGPT or Claude, for example `https://anna.scholz-cloud.eu`. OAuth works best with one canonical public domain.
 - The built-in `bearer` mode is useful for simple shared-token clients, but not the right fit for per-user ChatGPT or Claude access.
 - Search and download tools are always exposed.
 - `book_download` accepts `secret_key` per tool call, but with OAuth users usually do not need to pass it manually because the server resolves it from the signed-in account.
