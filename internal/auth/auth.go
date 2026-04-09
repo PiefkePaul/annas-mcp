@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1403,8 +1404,10 @@ func renderRedirectHTML(w http.ResponseWriter, title, targetURL string) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	_ = t.Execute(w, map[string]any{
-		"Title":     title,
-		"TargetURL": targetURL,
+		"Title":         title,
+		"TargetURL":     template.URL(targetURL),
+		"TargetURLJS":   template.JS(strconv.Quote(targetURL)),
+		"TargetDisplay": targetURL,
 	})
 }
 
@@ -1541,7 +1544,6 @@ const redirectTemplate = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}}</title>
-  <meta http-equiv="refresh" content="0;url={{.TargetURL}}">
   <style>
     body { font-family: ui-sans-serif, system-ui, sans-serif; background: #f7f7f5; color: #1f2937; margin: 0; }
     main { max-width: 720px; margin: 48px auto; background: white; padding: 32px; border-radius: 18px; box-shadow: 0 18px 40px rgba(0,0,0,.08); }
@@ -1551,7 +1553,7 @@ const redirectTemplate = `
   </style>
   <script>
     (function () {
-      var target = {{printf "%q" .TargetURL}};
+      var target = {{.TargetURLJS}};
       try { window.location.replace(target); } catch (e) {}
       try {
         if (window.top && window.top !== window) {
@@ -1570,7 +1572,7 @@ const redirectTemplate = `
     <h1>{{.Title}}</h1>
     <p class="muted">If the app does not continue automatically, use the link below.</p>
     <p><a href="{{.TargetURL}}">Continue back to the app</a></p>
-    <p><code>{{.TargetURL}}</code></p>
+    <p><code>{{.TargetDisplay}}</code></p>
   </main>
 </body>
 </html>
