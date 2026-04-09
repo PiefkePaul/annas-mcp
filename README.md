@@ -94,6 +94,34 @@ http://localhost:8080/mcp
 
 Downloaded files are written to the local `downloads/` directory on the host through the bind mount defined in `compose.yaml`.
 
+## Automatic Docker Hub Publishing
+
+This repository now includes [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml).
+It builds the container image from the existing `Dockerfile` and pushes it to Docker Hub:
+
+- on every push to `main`
+- on version tags matching `v*`
+- on manual runs through `workflow_dispatch`
+
+The workflow publishes:
+
+- `latest` for the default branch
+- `sha-<commit>` for each pushed commit
+- semantic version tags such as `v1.2.3`, `1.2`, and `1` when you push a matching Git tag
+
+To enable it in GitHub, add these repository settings under `Settings -> Secrets and variables -> Actions`:
+
+- Repository variable `DOCKER_USERNAME`: your Docker Hub login name
+- Repository secret `DOCKER_PASSWORD`: a Docker Hub personal access token with read/write access
+
+Optional repository variables:
+
+- `DOCKERHUB_NAMESPACE`: target namespace if you want to push somewhere other than your login namespace
+- `DOCKERHUB_REPOSITORY`: target repository name if it should differ from the GitHub repository name
+
+If the optional variables are unset, the workflow pushes to `<DOCKER_USERNAME>/<github-repo-name>`.
+If `DOCKER_PASSWORD` is not set yet, the workflow exits cleanly with a short summary instead of failing the entire Actions run.
+
 ## Running Without Docker
 
 ### Local stdio MCP server
