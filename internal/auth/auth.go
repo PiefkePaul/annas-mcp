@@ -41,14 +41,16 @@ var (
 )
 
 type Config struct {
-	StorePath            string
-	MasterKey            []byte
-	AccessTokenTTL       time.Duration
-	RefreshTokenTTL      time.Duration
-	AuthorizationCodeTTL time.Duration
-	SessionTTL           time.Duration
-	MCPPath              string
-	PublicBaseURL        string
+	StorePath                           string
+	MasterKey                           []byte
+	AccessTokenTTL                      time.Duration
+	RefreshTokenTTL                     time.Duration
+	AuthorizationCodeTTL                time.Duration
+	SessionTTL                          time.Duration
+	MCPPath                             string
+	PublicBaseURL                       string
+	RequireAuthorizedAccessConfirmation bool
+	AuthorizedAccessStatement           string
 }
 
 type Manager struct {
@@ -59,9 +61,10 @@ type Manager struct {
 }
 
 type Identity struct {
-	UserID    string
-	Email     string
-	SecretKey string
+	UserID                      string
+	Email                       string
+	SecretKey                   string
+	AuthorizedAccessConfirmedAt int64
 }
 
 type contextKey string
@@ -85,12 +88,13 @@ type encryptedStoreFile struct {
 }
 
 type userRecord struct {
-	ID           string `json:"id"`
-	Email        string `json:"email"`
-	PasswordHash string `json:"password_hash"`
-	SecretKey    string `json:"secret_key"`
-	CreatedAt    int64  `json:"created_at"`
-	UpdatedAt    int64  `json:"updated_at"`
+	ID                        string `json:"id"`
+	Email                     string `json:"email"`
+	PasswordHash              string `json:"password_hash"`
+	SecretKey                 string `json:"secret_key"`
+	AuthorizedAccessConfirmed int64  `json:"authorized_access_confirmed_at,omitempty"`
+	CreatedAt                 int64  `json:"created_at"`
+	UpdatedAt                 int64  `json:"updated_at"`
 }
 
 type sessionRecord struct {
@@ -850,9 +854,10 @@ func (m *Manager) ValidateAccessToken(token, resource string) (*Identity, error)
 	}
 
 	return &Identity{
-		UserID:    user.ID,
-		Email:     user.Email,
-		SecretKey: user.SecretKey,
+		UserID:                      user.ID,
+		Email:                       user.Email,
+		SecretKey:                   user.SecretKey,
+		AuthorizedAccessConfirmedAt: user.AuthorizedAccessConfirmed,
 	}, nil
 }
 
@@ -861,8 +866,10 @@ func (m *Manager) HandleAccountRegister(w http.ResponseWriter, r *http.Request) 
 	case http.MethodGet:
 		csrfToken := ensureCSRFCookie(w, r)
 		renderHTML(w, registerTemplate, map[string]any{
-			"CSRFToken": csrfToken,
-			"Next":      r.URL.Query().Get("next"),
+			"CSRFToken":                 csrfToken,
+			"Next":                      r.URL.Query().Get("next"),
+			"RequireAuthorizedAccess":   m.cfg.RequireAuthorizedAccessConfirmation,
+			"AuthorizedAccessStatement": m.cfg.AuthorizedAccessStatement,
 		})
 	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
@@ -879,13 +886,17 @@ func (m *Manager) HandleAccountRegister(w http.ResponseWriter, r *http.Request) 
 		secret := r.FormValue("secret_key")
 		next := sanitizeNext(r.FormValue("next"))
 
-		user, err := m.registerUser(email, password, secret)
+		confirmed := r.FormValue("authorized_access_confirmed") == "on"
+		user, err := m.registerUser(email, password, secret, confirmed)
 		if err != nil {
 			renderHTML(w, registerTemplate, map[string]any{
-				"CSRFToken": ensureCSRFCookie(w, r),
-				"Next":      next,
-				"Error":     err.Error(),
-				"Email":     email,
+				"CSRFToken":                 ensureCSRFCookie(w, r),
+				"Next":                      next,
+				"Error":                     err.Error(),
+				"Email":                     email,
+				"RequireAuthorizedAccess":   m.cfg.RequireAuthorizedAccessConfirmation,
+				"AuthorizedAccessStatement": m.cfg.AuthorizedAccessStatement,
+				"AuthorizedAccessConfirmed": confirmed,
 			})
 			return
 		}
@@ -983,9 +994,12 @@ func (m *Manager) HandleAccount(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		renderHTML(w, accountTemplate, map[string]any{
-			"CSRFToken":        ensureCSRFCookie(w, r),
-			"Email":            identity.Email,
-			"SecretConfigured": strings.TrimSpace(identity.SecretKey) != "",
+			"CSRFToken":                 ensureCSRFCookie(w, r),
+			"Email":                     identity.Email,
+			"SecretConfigured":          strings.TrimSpace(identity.SecretKey) != "",
+			"RequireAuthorizedAccess":   m.cfg.RequireAuthorizedAccessConfirmation,
+			"AuthorizedAccessStatement": m.cfg.AuthorizedAccessStatement,
+			"AuthorizedAccessConfirmed": identity.AuthorizedAccessConfirmedAt > 0,
 		})
 	case http.MethodPost:
 		if err := r.ParseForm(); err != nil {
@@ -996,15 +1010,27 @@ func (m *Manager) HandleAccount(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid CSRF token", http.StatusBadRequest)
 			return
 		}
-		if err := m.updateUserSecret(identity.UserID, strings.TrimSpace(r.FormValue("secret_key"))); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		confirmed := identity.AuthorizedAccessConfirmedAt > 0 || r.FormValue("authorized_access_confirmed") == "on"
+		if err := m.updateUserAccess(identity.UserID, strings.TrimSpace(r.FormValue("secret_key")), confirmed); err != nil {
+			renderHTML(w, accountTemplate, map[string]any{
+				"CSRFToken":                 ensureCSRFCookie(w, r),
+				"Email":                     identity.Email,
+				"SecretConfigured":          strings.TrimSpace(identity.SecretKey) != "",
+				"Error":                     err.Error(),
+				"RequireAuthorizedAccess":   m.cfg.RequireAuthorizedAccessConfirmation,
+				"AuthorizedAccessStatement": m.cfg.AuthorizedAccessStatement,
+				"AuthorizedAccessConfirmed": identity.AuthorizedAccessConfirmedAt > 0,
+			})
 			return
 		}
 		renderHTML(w, accountTemplate, map[string]any{
-			"CSRFToken":        ensureCSRFCookie(w, r),
-			"Email":            identity.Email,
-			"SecretConfigured": strings.TrimSpace(r.FormValue("secret_key")) != "",
-			"Success":          "Secret saved successfully.",
+			"CSRFToken":                 ensureCSRFCookie(w, r),
+			"Email":                     identity.Email,
+			"SecretConfigured":          strings.TrimSpace(r.FormValue("secret_key")) != "",
+			"Success":                   "Account settings saved successfully.",
+			"RequireAuthorizedAccess":   m.cfg.RequireAuthorizedAccessConfirmation,
+			"AuthorizedAccessStatement": m.cfg.AuthorizedAccessStatement,
+			"AuthorizedAccessConfirmed": confirmed,
 		})
 	default:
 		w.Header().Set("Allow", "GET, POST")
@@ -1012,13 +1038,16 @@ func (m *Manager) HandleAccount(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *Manager) registerUser(email, password, secret string) (*userRecord, error) {
+func (m *Manager) registerUser(email, password, secret string, confirmed bool) (*userRecord, error) {
 	email = normalizeEmail(email)
 	if !strings.Contains(email, "@") {
 		return nil, fmt.Errorf("please provide a valid email address")
 	}
 	if len(password) < 10 {
 		return nil, fmt.Errorf("password must be at least 10 characters long")
+	}
+	if m.cfg.RequireAuthorizedAccessConfirmation && !confirmed {
+		return nil, fmt.Errorf("you must confirm that downloads through this account are limited to files you are already authorized to obtain")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -1027,12 +1056,13 @@ func (m *Manager) registerUser(email, password, secret string) (*userRecord, err
 
 	now := time.Now()
 	user := &userRecord{
-		ID:           randomToken(18),
-		Email:        email,
-		PasswordHash: string(hash),
-		SecretKey:    strings.TrimSpace(secret),
-		CreatedAt:    now.Unix(),
-		UpdatedAt:    now.Unix(),
+		ID:                        randomToken(18),
+		Email:                     email,
+		PasswordHash:              string(hash),
+		SecretKey:                 strings.TrimSpace(secret),
+		AuthorizedAccessConfirmed: confirmedAt(now, confirmed),
+		CreatedAt:                 now.Unix(),
+		UpdatedAt:                 now.Unix(),
 	}
 
 	m.mu.Lock()
@@ -1130,13 +1160,14 @@ func (m *Manager) identityFromSession(r *http.Request) (*Identity, error) {
 		return nil, ErrNotAuthenticated
 	}
 	return &Identity{
-		UserID:    user.ID,
-		Email:     user.Email,
-		SecretKey: user.SecretKey,
+		UserID:                      user.ID,
+		Email:                       user.Email,
+		SecretKey:                   user.SecretKey,
+		AuthorizedAccessConfirmedAt: user.AuthorizedAccessConfirmed,
 	}, nil
 }
 
-func (m *Manager) updateUserSecret(userID, secret string) error {
+func (m *Manager) updateUserAccess(userID, secret string, confirmed bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1144,7 +1175,13 @@ func (m *Manager) updateUserSecret(userID, secret string) error {
 	if !ok {
 		return ErrNotAuthenticated
 	}
+	if m.cfg.RequireAuthorizedAccessConfirmation && !confirmed && user.AuthorizedAccessConfirmed <= 0 {
+		return fmt.Errorf("you must confirm that downloads through this account are limited to files you are already authorized to obtain")
+	}
 	user.SecretKey = strings.TrimSpace(secret)
+	if confirmed && user.AuthorizedAccessConfirmed <= 0 {
+		user.AuthorizedAccessConfirmed = time.Now().Unix()
+	}
 	user.UpdatedAt = time.Now().Unix()
 	return m.saveLocked()
 }
@@ -1291,6 +1328,13 @@ func randomToken(numBytes int) string {
 
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+func confirmedAt(now time.Time, confirmed bool) int64 {
+	if !confirmed {
+		return 0
+	}
+	return now.Unix()
 }
 
 func dedupeStrings(values []string) []string {
@@ -1443,9 +1487,12 @@ const layoutTemplate = `
     h1 { margin-top: 0; }
     label { display: block; margin: 16px 0 6px; font-weight: 600; }
     input { width: 100%; box-sizing: border-box; padding: 12px 14px; border-radius: 12px; border: 1px solid #d1d5db; font: inherit; }
+    input[type="checkbox"] { width: auto; margin: 0; }
     button { margin-top: 20px; padding: 12px 18px; border: 0; border-radius: 12px; background: #111827; color: white; font: inherit; cursor: pointer; }
     .secondary { background: #e5e7eb; color: #111827; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .checkbox { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; }
+    .checkbox label { margin: 0; font-weight: 500; }
     .notice { background: #eef6ff; color: #1d4ed8; padding: 12px 14px; border-radius: 12px; margin: 16px 0; }
     .error { background: #fef2f2; color: #b91c1c; padding: 12px 14px; border-radius: 12px; margin: 16px 0; }
     .muted { color: #6b7280; }
@@ -1476,6 +1523,13 @@ const registerTemplate = `
   <input id="password" name="password" type="password" required minlength="10">
   <label for="secret_key">Anna's Archive secret key</label>
   <input id="secret_key" name="secret_key" type="password" autocomplete="off">
+  {{if .RequireAuthorizedAccess}}
+  <div class="notice">{{.AuthorizedAccessStatement}}</div>
+  <div class="checkbox">
+    <input id="authorized_access_confirmed" name="authorized_access_confirmed" type="checkbox" {{if .AuthorizedAccessConfirmed}}checked{{end}}>
+    <label for="authorized_access_confirmed">I confirm that this account will only be used to download files I am already licensed, permitted, or otherwise authorized to obtain.</label>
+  </div>
+  {{end}}
   <button type="submit">Create account</button>
 </form>
 <p class="muted">Already registered? <a href="/account/login{{if .Next}}?next={{.Next}}{{end}}">Sign in</a></p>
@@ -1506,12 +1560,20 @@ const accountTemplate = `
 {{define "content"}}
 <h1>Account</h1>
 <p>Signed in as <strong>{{.Email}}</strong></p>
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
 {{if .Success}}<div class="notice">{{.Success}}</div>{{end}}
 <div class="notice">Stored Anna secret: {{if .SecretConfigured}}configured{{else}}not set{{end}}</div>
 <form method="post">
   <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
   <label for="secret_key">Anna's Archive secret key</label>
   <input id="secret_key" name="secret_key" type="password" autocomplete="off" placeholder="Paste or replace your secret">
+  {{if .RequireAuthorizedAccess}}
+  <div class="notice">{{.AuthorizedAccessStatement}}</div>
+  <div class="checkbox">
+    <input id="authorized_access_confirmed" name="authorized_access_confirmed" type="checkbox" {{if .AuthorizedAccessConfirmed}}checked{{end}}>
+    <label for="authorized_access_confirmed">I confirm that downloads through this account remain limited to files I am already authorized to obtain.</label>
+  </div>
+  {{end}}
   <button type="submit">Save secret</button>
 </form>
 <form method="post" action="/account/logout">

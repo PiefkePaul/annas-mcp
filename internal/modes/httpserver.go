@@ -28,6 +28,7 @@ func StartHTTPServer() {
 	if err != nil {
 		l.Fatal("Invalid HTTP environment", zap.Error(err))
 	}
+	usagePolicy := env.GetUsagePolicyEnv()
 
 	var authManager *auth.Manager
 	if httpEnv.AuthMode == env.HTTPAuthModeOAuth {
@@ -37,14 +38,16 @@ func StartHTTPServer() {
 		}
 
 		authManager, err = auth.NewManager(auth.Config{
-			StorePath:            authEnv.StorePath,
-			MasterKey:            authEnv.MasterKey,
-			AccessTokenTTL:       authEnv.AccessTokenTTL,
-			RefreshTokenTTL:      authEnv.RefreshTokenTTL,
-			AuthorizationCodeTTL: authEnv.AuthorizationCodeTTL,
-			SessionTTL:           authEnv.SessionTTL,
-			MCPPath:              httpEnv.Path,
-			PublicBaseURL:        httpEnv.PublicBaseURL,
+			StorePath:                           authEnv.StorePath,
+			MasterKey:                           authEnv.MasterKey,
+			AccessTokenTTL:                      authEnv.AccessTokenTTL,
+			RefreshTokenTTL:                     authEnv.RefreshTokenTTL,
+			AuthorizationCodeTTL:                authEnv.AuthorizationCodeTTL,
+			SessionTTL:                          authEnv.SessionTTL,
+			MCPPath:                             httpEnv.Path,
+			PublicBaseURL:                       httpEnv.PublicBaseURL,
+			RequireAuthorizedAccessConfirmation: usagePolicy.RequiresAuthenticatedAuthorizedAccess(),
+			AuthorizedAccessStatement:           usagePolicy.Statement(),
 		})
 		if err != nil {
 			l.Fatal("Failed to initialize OAuth/auth manager", zap.Error(err))
@@ -58,11 +61,15 @@ func StartHTTPServer() {
 	serverVersion := version.GetVersion()
 	availableTools := exposedToolNames()
 	baseEnv := env.GetBaseEnv()
-	usagePolicy := env.GetUsagePolicyEnv()
 	downloadStore := newEphemeralDownloadStore(defaultEphemeralDownloadTTL)
 
 	if !httpEnv.ChatGPTCompatibleAuth() {
 		l.Warn("Bearer auth is enabled. ChatGPT MCP connectors currently expect no auth or OAuth rather than a custom bearer token.",
+			zap.String("authMode", string(httpEnv.AuthMode)),
+		)
+	}
+	if usagePolicy.RequiresAuthenticatedAuthorizedAccess() && httpEnv.AuthMode != env.HTTPAuthModeOAuth {
+		l.Warn("Authorized-access attestation is enabled without OAuth. Download tools will require a signed-in OAuth identity and will fail until OAuth mode is enabled.",
 			zap.String("authMode", string(httpEnv.AuthMode)),
 		)
 	}
@@ -139,6 +146,7 @@ func StartHTTPServer() {
 				"temporary_download_links_enabled":   true,
 				"embedded_downloads_enabled":         false,
 				"operator_attests_authorized_access": usagePolicy.OperatorAttestsAuthorizedAccess,
+				"downloads_require_authenticated_authorized_access_confirmation": usagePolicy.RequiresAuthenticatedAuthorizedAccess(),
 			}
 
 			if usagePolicy.Statement() != "" {

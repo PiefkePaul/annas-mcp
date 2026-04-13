@@ -8,6 +8,7 @@ import (
 
 	"github.com/PiefkePaul/annas-mcp/internal/anna"
 	"github.com/PiefkePaul/annas-mcp/internal/auth"
+	"github.com/PiefkePaul/annas-mcp/internal/env"
 )
 
 func TestCreateDownloadURLNilStoreReturnsEmpty(t *testing.T) {
@@ -84,5 +85,25 @@ func TestResolveSecretKeyPrefersProvidedValue(t *testing.T) {
 
 	if got := resolveSecretKey("", nil); got != "env-secret" {
 		t.Fatalf("resolveSecretKey preferred %q, want %q", got, "env-secret")
+	}
+}
+
+func TestEnsureAuthorizedDownloadAccess(t *testing.T) {
+	policy := &env.UsagePolicyEnv{OperatorAttestsAuthorizedAccess: true}
+
+	if err := ensureAuthorizedDownloadAccess(nil, nil); err != nil {
+		t.Fatalf("ensureAuthorizedDownloadAccess(nil, nil) returned %v", err)
+	}
+
+	if err := ensureAuthorizedDownloadAccess(nil, policy); err == nil {
+		t.Fatal("expected error for missing identity when policy is enforced")
+	}
+
+	if err := ensureAuthorizedDownloadAccess(&auth.Identity{}, policy); err == nil {
+		t.Fatal("expected error for missing authorized access confirmation")
+	}
+
+	if err := ensureAuthorizedDownloadAccess(&auth.Identity{AuthorizedAccessConfirmedAt: time.Now().Unix()}, policy); err != nil {
+		t.Fatalf("expected confirmed identity to pass, got %v", err)
 	}
 }

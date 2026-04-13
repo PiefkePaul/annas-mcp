@@ -30,6 +30,10 @@ func (e *UsagePolicyEnv) Statement() string {
 	return defaultAuthorizedAccessStatement
 }
 
+func (e *UsagePolicyEnv) RequiresAuthenticatedAuthorizedAccess() bool {
+	return e != nil && e.OperatorAttestsAuthorizedAccess
+}
+
 func getBoolEnv(key string) bool {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
