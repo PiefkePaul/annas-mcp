@@ -21,7 +21,7 @@ func StartCLI() {
 	l := logger.GetLogger()
 	defer l.Sync()
 
-	if err := godotenv.Load(); err != nil {
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
 		l.Warn("Error loading .env file", zap.Error(err))
 	}
 

@@ -2,6 +2,7 @@
   annas-mcp:
     build:
       context: .
+      target: http-runtime
     container_name: annas-mcp
     restart: unless-stopped
     env_file:

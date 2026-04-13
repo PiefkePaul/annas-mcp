@@ -6,8 +6,20 @@ import (
 )
 
 //go:embed version.txt
-var version string
+var embeddedVersion string
+
+var (
+	Version   string
+	Commit    string
+	Revision  string
+	BuildDate string
+	BuiltBy   string
+)
 
 func GetVersion() string {
-	return strings.TrimSpace(version)
+	if strings.TrimSpace(Version) != "" {
+		return strings.TrimSpace(Version)
+	}
+
+	return strings.TrimSpace(embeddedVersion)
 }

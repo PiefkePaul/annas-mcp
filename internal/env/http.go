@@ -115,6 +115,9 @@ func normalizePublicBaseURL(raw string) (string, error) {
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return "", fmt.Errorf("ANNAS_PUBLIC_BASE_URL must use http or https")
 	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("ANNAS_PUBLIC_BASE_URL must not include a path")
+	}
 
 	return strings.TrimRight(raw, "/"), nil
 }

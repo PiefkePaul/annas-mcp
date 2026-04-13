@@ -12,11 +12,35 @@ permissions:
   contents: read
 
 jobs:
-  dockerhub:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Build CLI binary
+        run: go build ./cmd/annas-mcp
+
+      - name: Build hosted HTTP image
+        run: docker build --target http-runtime --tag annas-mcp:http-test .
+
+      - name: Build local MCP image
+        run: docker build --target mcp-stdio-runtime --tag annas-mcp:mcp-test .
+
+  dockerhub:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Resolve Docker Hub image settings
         id: image
@@ -67,7 +91,7 @@ jobs:
 
       - name: Extract Docker metadata
         if: steps.image.outputs.enabled == 'true'
-        id: meta
+        id: meta-http
         uses: docker/metadata-action@v6
         with:
           images: ${{ steps.image.outputs.image }}
@@ -78,15 +102,43 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
 
-      - name: Build and push Docker image
+      - name: Extract Docker metadata for local MCP image
+        if: steps.image.outputs.enabled == 'true'
+        id: meta-mcp
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.image }}
+          tags: |
+            type=raw,value=mcp,enable={{is_default_branch}}
+            type=sha,prefix=mcp-sha-
+            type=semver,pattern={{version}},prefix=mcp-
+            type=semver,pattern={{major}}.{{minor}},prefix=mcp-
+            type=semver,pattern={{major}},prefix=mcp-
+
+      - name: Build and push hosted HTTP image
         if: steps.image.outputs.enabled == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
+          target: http-runtime
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.meta-http.outputs.tags }}
+          labels: ${{ steps.meta-http.outputs.labels }}
+          cache-from: type=gha,scope=http-runtime
+          cache-to: type=gha,scope=http-runtime,mode=max
+
+      - name: Build and push local MCP image
+        if: steps.image.outputs.enabled == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          target: mcp-stdio-runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-mcp.outputs.tags }}
+          labels: ${{ steps.meta-mcp.outputs.labels }}
+          cache-from: type=gha,scope=mcp-stdio-runtime
+          cache-to: type=gha,scope=mcp-stdio-runtime,mode=max

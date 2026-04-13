@@ -2,13 +2,20 @@ version: 2
 
 before:
   hooks:
-    - go mod tidy
-    - go generate ./...
+    - go test ./...
+
 builds:
   - id: annas-mcp
     main: ./cmd/annas-mcp
+    binary: annas-mcp
     ldflags:
-      - -extldflags "-static" -s -w -X main.commit={{.Commit}} -X main.date={{.Date}} -X main.builtBy=goreleaser -X main.Version={{.Version}} -X main.Revision={{.ShortCommit}}
+      - >-
+        -s -w
+        -X github.com/PiefkePaul/annas-mcp/internal/version.Version={{.Version}}
+        -X github.com/PiefkePaul/annas-mcp/internal/version.Commit={{.Commit}}
+        -X github.com/PiefkePaul/annas-mcp/internal/version.Revision={{.ShortCommit}}
+        -X github.com/PiefkePaul/annas-mcp/internal/version.BuildDate={{.Date}}
+        -X github.com/PiefkePaul/annas-mcp/internal/version.BuiltBy=goreleaser
     env:
       - CGO_ENABLED=0
     goos:
@@ -31,8 +38,15 @@ builds:
 
   - id: annas-mcp-win
     main: ./cmd/annas-mcp
+    binary: annas-mcp
     ldflags:
-      - -extldflags "-static" -s -w -X main.commit={{.Commit}} -X main.date={{.Date}} -X main.builtBy=goreleaser -X main.Version={{.Version}} -X main.Revision={{.ShortCommit}}
+      - >-
+        -s -w
+        -X github.com/PiefkePaul/annas-mcp/internal/version.Version={{.Version}}
+        -X github.com/PiefkePaul/annas-mcp/internal/version.Commit={{.Commit}}
+        -X github.com/PiefkePaul/annas-mcp/internal/version.Revision={{.ShortCommit}}
+        -X github.com/PiefkePaul/annas-mcp/internal/version.BuildDate={{.Date}}
+        -X github.com/PiefkePaul/annas-mcp/internal/version.BuiltBy=goreleaser
     env:
       - CGO_ENABLED=0
     goos:

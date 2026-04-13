@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Go tests
+        run: go test ./...
+
+      - name: Build CLI binary
+        run: go build ./cmd/annas-mcp
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build hosted HTTP image
+        run: docker build --target http-runtime --tag annas-mcp:http-test .
+
+      - name: Build local MCP image
+        run: docker build --target mcp-stdio-runtime --tag annas-mcp:mcp-test .
