@@ -8,6 +8,7 @@ dist
 /annas-mcp
 
 # Runtime artifacts
+/.github/.tmp.Dockerfile
 .env
 downloads/
 authdata/
@@ -16,4 +17,3 @@ annas-auth-store.enc.tmp
 .tmp-auth/
 .tmp-auth-2/
 .tmp-auth-3/
-scripts/.smbdelete*

@@ -12,10 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -29,10 +29,55 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Create temporary Docker packaging
+        run: |
+          cat > .github/.tmp.Dockerfile <<'EOF'
+          FROM golang:1.23.4-alpine AS builder
+          WORKDIR /src
+
+          COPY go.mod go.sum ./
+          RUN go mod download
+
+          COPY . .
+
+          ARG TARGETOS=linux
+          ARG TARGETARCH=amd64
+          RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/annas-mcp ./cmd/annas-mcp
+
+          FROM alpine:3.20 AS runtime-base
+          RUN apk add --no-cache ca-certificates tzdata
+
+          WORKDIR /app
+          COPY --from=builder /out/annas-mcp /usr/local/bin/annas-mcp
+
+          ENTRYPOINT ["annas-mcp"]
+
+          FROM runtime-base AS mcp-stdio-runtime
+          CMD ["mcp"]
+
+          FROM runtime-base AS http-runtime
+          RUN apk add --no-cache wget
+
+          EXPOSE 8080
+
+          HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/healthz > /dev/null || exit 1
+
+          CMD ["http"]
+          EOF
+
+          cat > .dockerignore <<'EOF'
+          .git
+          .github
+          dist
+          .env
+          downloads/
+          screenshots/
+          EOF
 
       - name: Build hosted HTTP image
-        run: docker build --target http-runtime --tag annas-mcp:http-test .
+        run: docker build -f .github/.tmp.Dockerfile --target http-runtime --tag annas-mcp:http-test .
 
       - name: Build local MCP image
-        run: docker build --target mcp-stdio-runtime --tag annas-mcp:mcp-test .
+        run: docker build -f .github/.tmp.Dockerfile --target mcp-stdio-runtime --tag annas-mcp:mcp-test .

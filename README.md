@@ -1,4 +1,4 @@
-﻿# Anna's Archive MCP Server
+# Anna's Archive MCP Server
 
 This fork of [iosifache/annas-mcp](https://github.com/iosifache/annas-mcp) is structured as a normal hostable MCP server first, with Docker images published as distribution artifacts on top.
 
@@ -15,6 +15,7 @@ This repository now cleanly separates source distribution from container distrib
 - GitHub Releases publish hostable binaries for supported platforms.
 - Docker Hub publishes ready-to-run container images derived from the same source.
 - Pushes to `main` automatically rebuild and publish the Docker images after verification.
+- Docker packaging is generated inside GitHub Actions and is no longer stored as local project files in the source tree.
 
 The Docker output is intentionally split into two runtime variants:
 
@@ -94,36 +95,6 @@ The `:mcp` image starts `annas-mcp mcp` directly:
 
 That makes it the better Docker artifact for local MCP clients that launch servers over `stdio`.
 
-## Docker Compose Quick Start
-
-1. Create a local `.env` file from `.env.example`.
-2. Set `ANNAS_HTTP_AUTH_MODE=oauth` if you want per-user sign-in and stored secrets, or leave it at `none` for public unauthenticated use.
-3. If you use OAuth mode, set `ANNAS_AUTH_MASTER_KEY` and keep the `/data` volume persistent.
-4. Optionally set `ANNAS_SECRET_KEY` only if you want a server-side default fast-download key. Remote clients can also pass `secret_key` per download call.
-5. Start the hosted HTTP container from source:
-
-```bash
-docker compose up -d --build
-```
-
-6. Check that the container is healthy:
-
-```bash
-curl http://localhost:8080/healthz
-```
-
-7. Inspect the advertised deployment metadata:
-
-```bash
-curl http://localhost:8080/
-```
-
-8. Use the MCP endpoint at:
-
-```text
-http://localhost:8080/mcp
-```
-
 ## Environment Variables
 
 ### Search and Download Variables
@@ -145,14 +116,13 @@ http://localhost:8080/mcp
 | `ANNAS_HTTP_AUTH_MODE` | No | `none`, `oauth`, or `bearer`. Use `oauth` for per-user sign-in with stored secrets. Defaults to `none`. |
 | `ANNAS_HTTP_BEARER_TOKEN` | Only if `ANNAS_HTTP_AUTH_MODE=bearer` | Bearer token for non-ChatGPT clients. |
 | `ANNAS_PUBLIC_BASE_URL` | Recommended for public deployments, effectively required for stable OAuth behind reverse proxies | Public canonical base URL used for connector metadata, OAuth discovery, redirects, and temporary download links. Use the origin only, without a path suffix. |
-| `ANNAS_HTTP_PORT` | Compose only | Host port published by `compose.yaml`. Defaults to `8080`. |
 
 ### OAuth / Account Variables
 
 | Variable | Required | Description |
 | --- | --- | --- |
 | `ANNAS_AUTH_MASTER_KEY` | Yes when `ANNAS_HTTP_AUTH_MODE=oauth` | Master encryption key for the on-disk auth database. Must decode to exactly 32 bytes using base64, base64url, or hex. |
-| `ANNAS_AUTH_STORE_PATH` | No | Path to the encrypted auth database that stores users, registered OAuth clients, sessions, and tokens. Defaults to `/data/auth-store.enc` in `compose.yaml`. |
+| `ANNAS_AUTH_STORE_PATH` | No | Path to the encrypted auth database that stores users, registered OAuth clients, sessions, and tokens. Defaults to `./annas-auth-store.enc`. For container deployments, set it explicitly to a persistent mounted path such as `/data/auth-store.enc`. |
 | `ANNAS_AUTH_ACCESS_TOKEN_TTL` | No | OAuth access token lifetime. Defaults to `1h`. |
 | `ANNAS_AUTH_REFRESH_TOKEN_TTL` | No | OAuth refresh token lifetime. Defaults to `720h`. |
 | `ANNAS_AUTH_CODE_TTL` | No | OAuth authorization code lifetime. Defaults to `10m`. |
@@ -182,9 +152,9 @@ Important details:
 
 The repository now has three distinct automation paths:
 
-- `.github/workflows/ci.yml`: pull request validation for Go tests, binary build, and both Docker runtime variants
+- `.github/workflows/ci.yml`: pull request validation for Go tests, binary build, and generated Docker runtime variants
 - `.github/workflows/release.yml`: GitHub release artifacts on version tags matching `v*`
-- `.github/workflows/docker-publish.yml`: verified Docker Hub publishing on `main`, on version tags, and on manual runs
+- `.github/workflows/docker-publish.yml`: verified Docker Hub publishing on `main`, on version tags, and on manual runs using a temporary Docker packaging definition generated during the workflow
 
 The Docker workflow publishes:
 
@@ -234,6 +204,7 @@ A minimal public deployment pattern is:
 - This fork keeps the original search and download behavior, while extending transport, deployment, and remote MCP metadata.
 - The default source and container runtime for hosted deployments is `annas-mcp http`.
 - The dedicated Docker MCP image starts `annas-mcp mcp`.
+- The source repository intentionally does not keep checked-in Docker packaging files anymore; container packaging is generated in CI.
 
 ## Upstream
 
