@@ -58,6 +58,7 @@ func StartHTTPServer() {
 	serverVersion := version.GetVersion()
 	availableTools := exposedToolNames()
 	baseEnv := env.GetBaseEnv()
+	usagePolicy := env.GetUsagePolicyEnv()
 	downloadStore := newEphemeralDownloadStore(defaultEphemeralDownloadTTL)
 
 	if !httpEnv.ChatGPTCompatibleAuth() {
@@ -119,24 +120,29 @@ func StartHTTPServer() {
 			}
 
 			payload := map[string]any{
-				"name":                             "annas-mcp",
-				"version":                          serverVersion,
-				"transport":                        "streamable-http",
-				"mcp_endpoint":                     httpEnv.Path,
-				"health_endpoint":                  "/healthz",
-				"auth_mode":                        httpEnv.AuthMode,
-				"chatgpt_auth_compatible":          httpEnv.ChatGPTCompatibleAuth(),
-				"book_download_enabled":            true,
-				"article_download_enabled":         true,
-				"available_tools":                  availableTools,
-				"annas_mirrors":                    baseEnv.AnnasBaseURLs,
-				"primary_annas_mirror":             baseEnv.AnnasBaseURL,
-				"default_secret_configured":        env.HasDefaultSecretKey(),
-				"default_download_path_configured": env.HasDefaultDownloadPath(),
-				"inline_download_max_bytes":        env.GetMaxInlineDownloadBytes(),
-				"oauth_enabled":                    authManager != nil,
-				"temporary_download_links_enabled": true,
-				"embedded_downloads_enabled":       false,
+				"name":                               "annas-mcp",
+				"version":                            serverVersion,
+				"transport":                          "streamable-http",
+				"mcp_endpoint":                       httpEnv.Path,
+				"health_endpoint":                    "/healthz",
+				"auth_mode":                          httpEnv.AuthMode,
+				"chatgpt_auth_compatible":            httpEnv.ChatGPTCompatibleAuth(),
+				"book_download_enabled":              true,
+				"article_download_enabled":           true,
+				"available_tools":                    availableTools,
+				"annas_mirrors":                      baseEnv.AnnasBaseURLs,
+				"primary_annas_mirror":               baseEnv.AnnasBaseURL,
+				"default_secret_configured":          env.HasDefaultSecretKey(),
+				"default_download_path_configured":   env.HasDefaultDownloadPath(),
+				"inline_download_max_bytes":          env.GetMaxInlineDownloadBytes(),
+				"oauth_enabled":                      authManager != nil,
+				"temporary_download_links_enabled":   true,
+				"embedded_downloads_enabled":         false,
+				"operator_attests_authorized_access": usagePolicy.OperatorAttestsAuthorizedAccess,
+			}
+
+			if usagePolicy.Statement() != "" {
+				payload["authorized_access_statement"] = usagePolicy.Statement()
 			}
 
 			if connectorURL := httpEnv.ConnectorURL(); connectorURL != "" {
@@ -179,6 +185,7 @@ func StartHTTPServer() {
 		zap.Bool("defaultSecretConfigured", env.HasDefaultSecretKey()),
 		zap.Bool("defaultDownloadPathConfigured", env.HasDefaultDownloadPath()),
 		zap.Bool("oauthEnabled", authManager != nil),
+		zap.Bool("operatorAttestsAuthorizedAccess", usagePolicy.OperatorAttestsAuthorizedAccess),
 		zap.Strings("annasMirrors", baseEnv.AnnasBaseURLs),
 	)
 

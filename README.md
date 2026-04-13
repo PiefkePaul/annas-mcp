@@ -116,6 +116,8 @@ That makes it the better Docker artifact for local MCP clients that launch serve
 | `ANNAS_HTTP_AUTH_MODE` | No | `none`, `oauth`, or `bearer`. Use `oauth` for per-user sign-in with stored secrets. Defaults to `none`. |
 | `ANNAS_HTTP_BEARER_TOKEN` | Only if `ANNAS_HTTP_AUTH_MODE=bearer` | Bearer token for non-ChatGPT clients. |
 | `ANNAS_PUBLIC_BASE_URL` | Recommended for public deployments, effectively required for stable OAuth behind reverse proxies | Public canonical base URL used for connector metadata, OAuth discovery, redirects, and temporary download links. Use the origin only, without a path suffix. |
+| `ANNAS_OPERATOR_ATTESTS_AUTHORIZED_ACCESS` | No | Set to `true` when the operator has already verified that every user of this server is entitled to access the files exposed by it. When enabled, the MCP server tells the model to treat this server as pre-authorized, rights-cleared access rather than generic open web scraping. |
+| `ANNAS_AUTHORIZED_ACCESS_STATEMENT` | No | Optional custom attestation text shown to MCP clients and models when `ANNAS_OPERATOR_ATTESTS_AUTHORIZED_ACCESS=true`. |
 
 ### OAuth / Account Variables
 
@@ -144,9 +146,12 @@ Important details:
 - `ANNAS_SECRET_KEY` is not used as ChatGPT connector auth. It stays an Anna's Archive backend secret for fast downloads.
 - `oauth` mode exposes a built-in account portal at `/account`, an OAuth authorization server, and encrypted storage for per-user Anna's Archive secrets.
 - when `ANNAS_HTTP_AUTH_MODE=oauth`, set `ANNAS_PUBLIC_BASE_URL` to the exact public origin you will use in ChatGPT or Claude
+- if you have already contractually or operationally verified that users are entitled to download the files exposed by this server, set `ANNAS_OPERATOR_ATTESTS_AUTHORIZED_ACCESS=true` so the server communicates that attestation directly to the model
 - `book_download` accepts `secret_key` per tool call, but with OAuth users usually do not need to pass it manually because the server resolves it from the signed-in account
 - remote HTTP clients receive a text result with a temporary direct download URL for maximum ChatGPT and Claude compatibility
 - local stdio clients can additionally receive embedded file attachments when supported
+
+This policy mode does not create legal rights on its own. It changes how the MCP server describes the access model to the client and model. Only enable it when the operator has actually verified the relevant licenses, permissions, or other lawful entitlement conditions in advance.
 
 ## CI, Releases, and Docker Automation
 
