@@ -26,6 +26,8 @@ jobs:
         run: go build ./cmd/annas-mcp
 
   docker:
+    # Gitea-Runner ubuntu-latest hat keinen Docker-Zugang; dort baut gitea-image.yml.
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,7 +36,7 @@ jobs:
       - name: Create temporary Docker packaging
         run: |
           cat > .github/.tmp.Dockerfile <<'EOF'
-          FROM golang:1.23.4-alpine AS builder
+          FROM golang:1.27-alpine3.24 AS builder
           WORKDIR /src
 
           COPY go.mod go.sum ./
@@ -46,7 +48,7 @@ jobs:
           ARG TARGETARCH=amd64
           RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/annas-mcp ./cmd/annas-mcp
 
-          FROM alpine:3.20 AS runtime-base
+          FROM alpine:3.24 AS runtime-base
           RUN apk add --no-cache ca-certificates tzdata
 
           WORKDIR /app
